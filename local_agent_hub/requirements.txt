@@ -1,0 +1,34 @@
+# BUJA Core Platform - Local Agent Hub (Worker) Dependencies
+# Python 3.10+
+
+# HTTP Client (Outbound only)
+httpx==0.27.0
+
+# Security
+cryptography==42.0.0
+
+# Configuration & Validation
+pydantic==2.5.3
+pydantic-settings==2.1.0
+pyyaml==6.0.1
+python-dotenv==1.0.0
+
+# CLI Interface
+typer==0.9.0
+rich==13.7.0  # For beautiful CLI output
+
+# File Operations
+watchdog==4.0.0  # For file watching (Roo Code completion detection)
+
+# Utilities
+python-dateutil==2.8.2
+
+# Logging
+structlog==24.1.0
+
+# Development
+pytest==7.4.4
+pytest-asyncio==0.23.3
+black==24.1.1
+isort==5.13.2
+mypy==1.8.0

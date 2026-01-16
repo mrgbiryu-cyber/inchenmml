@@ -1,0 +1,80 @@
+# Docker Compose for BUJA Core Platform
+# Development Environment
+
+version: '3.8'
+
+services:
+  # Redis - Job Queue & Cache
+  redis:
+    image: redis:7.2-alpine
+    container_name: buja-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - buja-network
+
+  # Neo4j - Knowledge Graph
+  neo4j:
+    image: neo4j:5.16-community
+    container_name: buja-neo4j
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/buja_password_change_this
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=2G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "buja_password_change_this", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - buja-network
+
+  # PostgreSQL - Relational Data (Optional)
+  postgres:
+    image: postgres:16-alpine
+    container_name: buja-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=buja
+      - POSTGRES_PASSWORD=buja_password_change_this
+      - POSTGRES_DB=buja_core
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buja"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - buja-network
+
+volumes:
+  redis_data:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  buja-network:
+    driver: bridge

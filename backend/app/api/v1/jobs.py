@@ -1,0 +1,228 @@
+"""
+Job management endpoints
+Handles job creation, status queries, and worker polling
+"""
+from typing import Optional
+from uuid import UUID
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from structlog import get_logger
+
+from app.models.schemas import (
+    JobCreate,
+    JobCreateResponse,
+    JobStatusResponse,
+    JobStatus,
+    User,
+    JobResult
+)
+from app.api.dependencies import (
+    get_current_active_user,
+    get_current_super_admin,
+    verify_worker_credentials
+)
+from app.services.job_manager import JobManager, PermissionDenied, QuotaExceeded
+
+logger = get_logger(__name__)
+
+router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+def get_job_manager(request: Request) -> JobManager:
+    """Dependency to get JobManager from app state"""
+    return request.app.state.job_manager
+
+
+@router.post("", response_model=JobCreateResponse, status_code=status.HTTP_202_ACCEPTED)
+async def create_job(
+    job_request: JobCreate,
+    current_user: User = Depends(get_current_active_user),
+    job_manager: JobManager = Depends(get_job_manager)
+):
+    """
+    Create a new job
+    
+    Process:
+    1. Validate user permissions
+    2. Create and sign job
+    3. Queue job for execution
+    
+    Args:
+        job_request: Job creation request
+        current_user: Authenticated user
+        job_manager: Job manager service
+        
+    Returns:
+        Job ID and status
+        
+    Raises:
+        HTTPException: If permission denied or quota exceeded
+    """
+    try:
+        job = await job_manager.create_job(current_user, job_request)
+        
+        logger.info(
+            "Job created via API",
+            job_id=str(job.job_id),
+            user_id=current_user.id,
+            execution_location=job.execution_location.value
+        )
+        
+        return JobCreateResponse(
+            job_id=job.job_id,
+            status=job.status,
+            message=f"Job queued successfully for {job.execution_location.value} execution"
+        )
+        
+    except PermissionDenied as e:
+        logger.warning(
+            "Job creation denied",
+            user_id=current_user.id,
+            reason=str(e)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
+    
+    except QuotaExceeded as e:
+        logger.warning(
+            "Quota exceeded",
+            tenant_id=current_user.tenant_id,
+            reason=str(e)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(e)
+        )
+    
+    except Exception as e:
+        # Catch-all for debugging
+        import traceback
+        logger.error(
+            "Unexpected error in job creation",
+            error=str(e),
+            traceback=traceback.format_exc()
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Job creation failed: {str(e)}"
+        )
+
+
+@router.get("/{job_id}/status")
+async def get_job_status(
+    job_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    job_manager: JobManager = Depends(get_job_manager)
+):
+    """
+    Get job status and details
+    
+    Args:
+        job_id: Job identifier
+        current_user: Authenticated user
+        job_manager: Job manager service
+        
+    Returns:
+        Job status information
+        
+    Raises:
+        HTTPException: If job not found or access denied
+    """
+    try:
+        job_status = await job_manager.get_job_status(str(job_id), current_user)
+        
+        if job_status is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job {job_id} not found"
+            )
+        
+        return job_status
+        
+    except PermissionDenied as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
+
+
+@router.get("/pending")
+async def get_pending_job(
+    worker_token: str = Depends(verify_worker_credentials),
+    job_manager: JobManager = Depends(get_job_manager)
+):
+    """
+    Worker endpoint: Poll for pending jobs (long polling)
+    
+    This endpoint is called by Local Workers to fetch jobs from the queue.
+    Uses long polling with 30s timeout.
+    
+    Args:
+        worker_token: Validated worker token
+        job_manager: Job manager service
+        
+    Returns:
+        Job JSON (200) or None (204) if no jobs available
+    """
+    # In production, determine tenant_id from worker registration
+    # For now, use default tenant
+    tenant_id = "tenant_hyungnim"
+    
+    queue_key = f"job_queue:{tenant_id}"
+    
+    # BLPOP with 30s timeout (long polling)
+    result = await job_manager.redis.blpop(queue_key, timeout=30)
+    
+    if result is None:
+        # No jobs available - return 204 No Content
+        logger.debug("No pending jobs available")
+        return None
+    
+    # result is tuple: (queue_key, job_json)
+    _, job_json = result
+    
+    logger.info(
+        "Job fetched by worker",
+        worker_token=worker_token[:20] + "...",
+        tenant_id=tenant_id
+    )
+    
+    # Return job JSON
+    import json
+    return json.loads(job_json)
+
+
+@router.post("/{job_id}/result")
+async def submit_job_result(
+    job_id: UUID,
+    result: JobResult,
+    worker_token: str = Depends(verify_worker_credentials),
+    job_manager: JobManager = Depends(get_job_manager)
+):
+    """
+    Worker endpoint: Submit job execution result
+    
+    Args:
+        job_id: Job identifier
+        result: Job execution result
+        worker_token: Validated worker token
+        job_manager: Job manager service
+        
+    Returns:
+        Confirmation message
+    """
+    await job_manager.update_job_status(
+        str(job_id),
+        result.status,
+        result
+    )
+    
+    logger.info(
+        "Job result submitted",
+        job_id=str(job_id),
+        status=result.status.value,
+        worker_token=worker_token[:20] + "..."
+    )
+    
+    return {"message": "Result uploaded successfully", "job_id": str(job_id)}

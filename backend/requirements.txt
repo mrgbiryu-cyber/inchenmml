@@ -1,3 +1,4 @@
+# Update requirements to use python-jose instead of PyJWT for FastAPI compatibility
 # BUJA Core Platform - Backend Dependencies
 # Python 3.10+
 
@@ -8,15 +9,15 @@ pydantic==2.5.3
 pydantic-settings==2.1.0
 
 # Authentication & Security
-PyJWT==2.8.0
+python-jose[cryptography]==3.3.0  # JWT with cryptography support
+passlib[bcrypt]==1.7.4  # Password hashing
 cryptography==42.0.0
-bcrypt==4.1.2
 python-multipart==0.0.6
 
 # Database & Storage
-redis==5.0.1
+redis[hiredis]==5.0.1
 neo4j==5.16.0
-pinecone-client==3.0.0
+pinecone-client>=3.0.0
 
 # LLM & AI
 langchain==0.1.0
@@ -30,7 +31,6 @@ aiohttp==3.9.1
 
 # Task Queue (Optional - for Gardener)
 celery==5.3.4
-redis[hiredis]==5.0.1
 
 # Utilities
 python-dotenv==1.0.0

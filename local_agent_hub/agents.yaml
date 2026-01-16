@@ -1,0 +1,100 @@
+# BUJA Core Platform - Local Agent Hub Configuration
+# Copy this file to agents.yaml and configure for your environment
+# SECURITY: Protect this file with restrictive permissions (chmod 600)
+
+# ============================================
+# Server Connection
+# ============================================
+server:
+  url: http://localhost:8000 
+  worker_token: sk_worker_1234567890abcdef  # Issued by Super Admin
+  poll_interval: 5       # Seconds between polls (if no jobs)
+  timeout: 30            # Long-polling timeout
+  heartbeat_interval: 30 # Health check frequency (seconds)
+
+# ============================================
+# Worker Capabilities
+# ============================================
+capabilities:
+  - provider: OLLAMA
+    model: mimo-v2-flash
+    endpoint: http://localhost:11434
+    timeout: 120           # Model inference timeout (seconds)
+    max_concurrent: 3      # Max parallel jobs
+
+# ============================================
+# Security Configuration
+# ============================================
+security:
+  job_signing_public_key: |
+    -----BEGIN PUBLIC KEY-----
+    MCowBQYDK2VwAyEAwy913GZ0cE9QVx80TS7kjByP35WVmGXLPCdJzChlBYQ=
+    -----END PUBLIC KEY-----
+  
+  # Path constraints (whitelist)
+  allowed_path_prefixes:
+    - "src/"
+    - "tests/"
+    - "docs/"
+    - "scripts/"
+  
+  # Absolute blacklist (even if in allowed_paths)
+  forbidden_absolute_paths:
+    - "/etc/"
+    - "/root/"
+    - "/sys/"
+    - "/proc/"
+    - "/boot/"
+    - "/dev/"
+    - "/var/"
+    - "~/.ssh/"
+    - "~/.aws/"
+    - "~/.kube/"
+
+# ============================================
+# Execution Configuration
+# ============================================
+execution:
+  # Roo Code integration
+  roo_code:
+    enabled: true
+    task_file: "TASK.md"
+    completion_marker: ".roo_completed"
+    trigger_method: "watcher"  # watcher | cli | manual
+  
+  # File limits
+  max_file_size_bytes: 1048576      # 1 MB per file
+  max_total_size_bytes: 10485760    # 10 MB per job
+  
+  # Git integration
+  git:
+    enabled: true
+    auto_commit: false  # Auto-commit changes after job completion
+
+# ============================================
+# Logging Configuration
+# ============================================
+logging:
+  level: INFO       # DEBUG | INFO | WARNING | ERROR
+  file: logs/worker.log
+  max_size_bytes: 10485760  # 10 MB
+  backup_count: 5
+  format: "[%(asctime)s] %(levelname)s: %(message)s"
+  
+  # Structured logging
+  structured: true
+  json_format: false
+
+# ============================================
+# Worker Identity
+# ============================================
+worker:
+  id: worker_001  # Unique identifier for this worker
+  name: "Development Worker"
+  tags:
+    - "development"
+    - "mimo-v2-flash"
+  
+  # Resource limits
+  max_memory_mb: 4096
+  max_cpu_percent: 80

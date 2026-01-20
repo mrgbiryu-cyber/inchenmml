@@ -125,7 +125,8 @@ class JobManager:
             "metadata": job_request.metadata.dict(),
             "file_operations": [op.dict() for op in job_request.file_operations],
             "retry_count": 0,
-            "reassign_count": 0
+            "reassign_count": 0,
+            "execution_started_at": None
         }
         
         # Add conditional fields for LOCAL_MACHINE
@@ -180,11 +181,20 @@ class JobManager:
             PermissionDenied: If user lacks permission
         """
         if job_request.execution_location == ExecutionLocation.LOCAL_MACHINE:
+            # ORIGINAL RULE: Only SUPER_ADMIN can use LOCAL_MACHINE
+            # NEW RULE: Standard users can use LOCAL_MACHINE if they have specific domain permissions
+            # The actual domain check happens in the API layer (jobs.py) before calling this.
+            # So here we just need to allow it if the user is not a super admin but has permissions.
+            
+            # However, for security, we might want to ensure that standard users ONLY use LOCAL_MACHINE
+            # if they have at least one allowed domain.
             if user.role != UserRole.SUPER_ADMIN:
-                raise PermissionDenied(
-                    "LOCAL_MACHINE execution requires SUPER_ADMIN role. "
-                    "Standard users can only use CLOUD execution."
-                )
+                if not user.allowed_domains:
+                    raise PermissionDenied(
+                        "LOCAL_MACHINE execution requires SUPER_ADMIN role or explicit domain permission."
+                    )
+                # If they have allowed_domains, we assume the API layer has validated the specific repo_root.
+                pass
     
     async def _check_quota(self, tenant_id: str) -> None:
         """

@@ -138,6 +138,9 @@ def sign_job_payload(job_data: dict) -> str:
         
         if not private_key_pem:
             raise SecurityError("JOB_SIGNING_PRIVATE_KEY not configured")
+            
+        # Handle literal \n characters from .env
+        private_key_pem = private_key_pem.replace('\\n', '\n')
         
         # Handle both raw PEM and environment variable formats
         if not private_key_pem.startswith("-----BEGIN"):

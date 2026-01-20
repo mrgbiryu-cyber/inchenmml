@@ -63,10 +63,11 @@ app = FastAPI(
 )
 
 # CORS middleware
+# Allow all origins for mobile/external access during development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS.split(","),
-    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -74,6 +75,15 @@ app.add_middleware(
 # Include routers
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(jobs.router, prefix="/api/v1")
+from app.api.v1 import workers, admin, projects, orchestration, models
+app.include_router(workers.router, prefix="/api/v1")
+app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
+app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"])
+app.include_router(orchestration.router, prefix="/api/v1/orchestration", tags=["orchestration"])
+app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
+
+from app.api.v1 import master
+app.include_router(master.router, prefix="/api/v1/master", tags=["master"])
 
 
 @app.get("/")
@@ -105,6 +115,12 @@ async def health_check():
         }
     }
 
+@app.get("/api/v1/health")
+async def api_health_check():
+    """API V1 Health check endpoint (alias)"""
+    return await health_check()
+
+
 
 if __name__ == "__main__":
     import uvicorn
@@ -116,3 +132,5 @@ if __name__ == "__main__":
         reload=settings.DEBUG,
         log_level=settings.LOG_LEVEL.lower()
     )
+    
+# Force reload comment

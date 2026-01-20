@@ -1,0 +1,86 @@
+import uuid
+from typing import List, Dict, Any, Optional
+from pinecone import Pinecone
+from app.core.config import settings
+
+class PineconeClient:
+    """
+    Client for interacting with Pinecone Vector Database.
+    Enforces tenant_id isolation in all operations.
+    """
+    
+    def __init__(self):
+        if not settings.PINECONE_API_KEY:
+            # For development without keys, we can warn or mock
+            print("⚠️ PINECONE_API_KEY not set. Vector store will not function.")
+            self.client = None
+            self.index = None
+            return
+
+        self.client = Pinecone(api_key=settings.PINECONE_API_KEY)
+        self.index_name = settings.PINECONE_INDEX_NAME
+        self.index = self.client.Index(self.index_name)
+
+    async def upsert_vectors(
+        self, 
+        tenant_id: str, 
+        vectors: List[Dict[str, Any]], 
+        namespace: str = "default"
+    ):
+        """
+        Upsert vectors with tenant_id metadata enforcement.
+        
+        Args:
+            tenant_id: Tenant identifier for isolation
+            vectors: List of dicts with 'id', 'values', 'metadata'
+            namespace: Pinecone namespace (optional)
+        """
+        if not self.index:
+            return
+
+        # Enforce tenant_id in metadata
+        for vec in vectors:
+            if "metadata" not in vec:
+                vec["metadata"] = {}
+            vec["metadata"]["tenant_id"] = tenant_id
+
+        # Upsert
+        # Note: In async app, this should ideally be run in threadpool as Pinecone client is sync
+        # For now, we call it directly.
+        self.index.upsert(vectors=vectors, namespace=namespace)
+
+    async def query_vectors(
+        self,
+        tenant_id: str,
+        vector: List[float],
+        top_k: int = 5,
+        filter_metadata: Optional[Dict] = None,
+        namespace: str = "default"
+    ) -> List[Dict]:
+        """
+        Query vectors with tenant_id filter enforcement.
+        """
+        if not self.index:
+            return []
+
+        # Construct filter
+        query_filter = {"tenant_id": tenant_id}
+        if filter_metadata:
+            query_filter.update(filter_metadata)
+
+        results = self.index.query(
+            vector=vector,
+            top_k=top_k,
+            filter=query_filter,
+            include_metadata=True,
+            namespace=namespace
+        )
+
+        return [
+            {
+                "id": match.id,
+                "score": match.score,
+                "metadata": match.metadata
+            }
+            for match in results.matches
+        ]

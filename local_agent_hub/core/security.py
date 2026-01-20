@@ -218,11 +218,21 @@ def validate_job_paths(job: dict) -> None:
     if not repo_root:
         raise SecurityError("Job missing repo_root")
     
-    if not Path(repo_root).is_absolute():
-        raise SecurityError(f"repo_root must be absolute: {repo_root}")
+    repo_path = Path(repo_root)
     
-    if not Path(repo_root).exists():
-        raise SecurityError(f"repo_root does not exist: {repo_root}")
+    # On Windows, /foo is not absolute (needs drive letter). 
+    # But it resolves to D:\foo which IS absolute.
+    if not repo_path.is_absolute():
+        resolved = repo_path.resolve()
+        if resolved.is_absolute():
+            repo_path = resolved
+            # We don't update job['repo_root'] here as it might break signature, 
+            # but we use repo_path for existence check.
+        else:
+            raise SecurityError(f"repo_root must be absolute: {repo_root}")
+    
+    if not repo_path.exists():
+        raise SecurityError(f"repo_root does not exist: {repo_root} (resolved: {repo_path})")
     
     # Validate each file operation
     for file_op in job.get('file_operations', []):

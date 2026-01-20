@@ -11,6 +11,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!frontend/src/lib/
 lib64/
 parts/
 sdist/
@@ -20,7 +21,19 @@ wheels/
 .installed.cfg
 *.egg
 
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
 
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Local Configuration
+agents.yaml
 local_config.yaml
 
 # IDE

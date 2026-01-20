@@ -55,17 +55,29 @@ class JobPoller:
             httpx.HTTPError: If request fails
         """
         try:
+            logger.debug(f"Polling for jobs at {self.server_url}/api/v1/jobs/pending")
             response = await self.client.get(
                 f"{self.server_url}/api/v1/jobs/pending",
                 timeout=self.timeout
             )
             
+            logger.debug(f"Poll response status: {response.status_code}")
+            
             if response.status_code == 200:
-                job = response.json()
+                # Check for empty content
+                if not response.content:
+                    logger.warning("Received 200 OK but empty content")
+                    return None
+
+                try:
+                    job = response.json()
+                except Exception as e:
+                    logger.error(f"Failed to parse JSON response: {e}", raw_content=response.text[:200])
+                    return None
                 
                 # Check if job is None or empty
                 if job is None:
-                    logger.debug("Received None from backend")
+                    logger.debug("Received None from backend (after JSON parse)")
                     return None
                 
                 logger.info(
@@ -77,14 +89,14 @@ class JobPoller:
             
             elif response.status_code == 204:
                 # No jobs available
-                logger.debug("No pending jobs")
+                # logger.debug("No pending jobs") # Too noisy
                 return None
             
             else:
                 logger.warning(
                     "Unexpected response from backend",
                     status_code=response.status_code,
-                    response=response.text
+                    response=response.text[:200]
                 )
                 return None
                 

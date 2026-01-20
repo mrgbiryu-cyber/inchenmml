@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: Optional[str] = None
     REDIS_URL: str = "redis://localhost:6379/0"
-    NEO4J_URL: str = "bolt://localhost:7687"
+    NEO4J_URI: str = "bolt://localhost:7687"
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = "password"
     
@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     # LLM Providers
     OPENROUTER_API_KEY: Optional[str] = None
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    
+    # Search
+    TAVILY_API_KEY: Optional[str] = None
+    
+    # Observability
+    LANGFUSE_PUBLIC_KEY: Optional[str] = None
+    LANGFUSE_SECRET_KEY: Optional[str] = None
+    LANGFUSE_HOST: str = "https://cloud.langfuse.com"
     
     # Authentication & Security
     # 2. 👇 이제 환경변수에서 값을 가져옵니다. (없으면 에러)

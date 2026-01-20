@@ -60,16 +60,30 @@ async def get_current_user(
             detail="Invalid role in token",
         )
     
-    # In production, fetch user from database
-    # For now, construct from token data
-    user = User(
-        id=user_id,
-        username=user_id,  # In production, fetch from DB
-        tenant_id=tenant_id,
-        role=role,
-        is_active=True,
-        created_at=None  # In production, fetch from DB
-    )
+    # Fetch user from mock DB to get full details (quota, allowed_domains)
+    from app.api.v1.auth import MOCK_USERS_DB
+    
+    # Try to find user by ID (which is stored as 'id' in MOCK_USERS_DB values)
+    # Note: MOCK_USERS_DB keys are usernames, values are dicts
+    user_data = None
+    for u in MOCK_USERS_DB.values():
+        if u["id"] == user_id:
+            user_data = u
+            break
+            
+    if not user_data:
+        # Fallback if not found in DB (shouldn't happen if token is valid)
+        # Construct minimal user object
+        user = User(
+            id=user_id,
+            username=user_id,
+            tenant_id=tenant_id,
+            role=role,
+            is_active=True
+        )
+    else:
+        # Create User object from DB data
+        user = User(**user_data)
     
     return user
 

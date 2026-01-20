@@ -2,7 +2,7 @@
 Pydantic models for BUJA Core Platform
 Defines schemas for Jobs, Users, and API requests/responses
 """
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
 from uuid import UUID
@@ -83,6 +83,9 @@ class JobMetadata(BaseModel):
     estimated_files: Optional[int] = None
     request_source: Optional[str] = None
     user_context: Optional[str] = None
+    
+    class Config:
+        extra = "allow" # Allow arbitrary fields like role, system_prompt
 
 
 class JobCreate(BaseModel):
@@ -192,6 +195,29 @@ class JobStatusResponse(BaseModel):
 # User Models
 # ============================================
 
+class UserQuota(BaseModel):
+    """Resource limits for a user"""
+    max_daily_jobs: int = 100
+    max_concurrent_jobs: int = 5
+    max_storage_mb: int = 1024  # 1GB
+    
+    # Current usage (reset periodically)
+    current_daily_jobs: int = 0
+    current_storage_mb: int = 0
+
+
+class Domain(BaseModel):
+    """Represents a project/repository"""
+    id: str = Field(..., description="Unique ID (e.g., 'project-alpha')")
+    name: str
+    repo_root: str
+    description: Optional[str] = None
+    owner_id: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    is_active: bool = True
+    agent_config: Dict[str, Any] = Field(default_factory=dict, description="Agent configuration (model, provider, etc.)")
+
+
 class User(BaseModel):
     """User model"""
     id: str
@@ -201,6 +227,10 @@ class User(BaseModel):
     role: UserRole
     is_active: bool = True
     created_at: Optional[datetime] = None
+    
+    # New fields for quota and permissions
+    quota: UserQuota = Field(default_factory=UserQuota)
+    allowed_domains: List[str] = Field(default_factory=list, description="List of domain IDs this user can access")
     
     class Config:
         from_attributes = True
@@ -252,3 +282,48 @@ class ErrorResponse(BaseModel):
     error: str
     detail: Optional[str] = None
     code: Optional[str] = None
+
+
+# ============================================
+# Project & Agent Models (Phase 1 & 2)
+# ============================================
+
+class AgentDefinition(BaseModel):
+    """Defines a single agent in a workflow"""
+    agent_id: str
+    role: str = Field(..., description="PLANNER | CODER | REVIEWER | QA")
+    model: str
+    provider: Literal["OPENROUTER", "OLLAMA"]
+    system_prompt: str
+    next_agents: List[str] = Field(default_factory=list)
+
+
+class ProjectAgentConfig(BaseModel):
+    """Configuration for agents in a project"""
+    workflow_type: Literal["SEQUENTIAL", "PARALLEL", "CUSTOM"]
+    agents: List[AgentDefinition]
+    entry_agent_id: str
+
+
+class ProjectCreate(BaseModel):
+    """Request to create a new project"""
+    name: str
+    description: Optional[str] = None
+    project_type: Literal["EXISTING", "NEW"]
+    repo_path: Optional[str] = None
+    agent_config: Optional[ProjectAgentConfig] = None
+
+class Project(BaseModel):
+    """Project model"""
+    id: str = Field(..., description="UUID")
+    name: str
+    description: Optional[str] = None
+    project_type: Literal["EXISTING", "NEW", "SYSTEM"] = "EXISTING"
+    repo_path: Optional[str] = None
+    tenant_id: str
+    user_id: str = "system"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    # Agent Config
+    agent_config: Optional[ProjectAgentConfig] = None

@@ -1,5 +1,13 @@
+# -*- coding: utf-8 -*-
 import json
+import sys
+
+# [UTF-8] Force stdout/stderr to UTF-8
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from fastapi.responses import StreamingResponse
 from app.models.master import MasterAgentConfig, ChatRequest, ChatResponse, ChatMessage
 from app.services.master_agent_service import MasterAgentService
 from app.api.dependencies import get_current_user
@@ -26,7 +34,7 @@ async def chat(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Send a message to the master agent (REST API).
+    Send a message to the master agent (REST API - non-streaming).
     """
     print(f"DEBUG: Chat endpoint received project_id: {request.project_id} from User: {current_user.username}")
     
@@ -36,12 +44,38 @@ async def chat(
         request.project_id, 
         request.thread_id,
         user=current_user,
-        worker_status=request.worker_status # Context injection
+        worker_status=request.worker_status
     )
     return ChatResponse(
         message=response["message"],
         quick_links=response["quick_links"]
     )
+
+@router.post("/chat-stream")
+async def chat_stream(
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    [TODO 8] Streaming chat with Tool Call Interceptor.
+    """
+    async def event_generator():
+        try:
+            async for chunk in service.stream_message(
+                request.message, 
+                request.history, 
+                request.project_id, 
+                request.thread_id,
+                user=current_user,
+                worker_status=request.worker_status
+            ):
+                # Send as simple text chunks or JSON if needed. 
+                # For basic streaming, we send raw text.
+                yield chunk
+        except Exception as e:
+            yield f"\n[Error]: {str(e)}"
+
+    return StreamingResponse(event_generator(), media_type="text/plain")
 
 @router.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):

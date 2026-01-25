@@ -201,6 +201,12 @@ class JobPoller:
                     job_id=job.get('job_id')
                 )
                 
+                # [Reliable Queue] Acknowledge job receipt
+                try:
+                    await self.client.post(f"{self.server_url}/api/v1/jobs/{job.get('job_id')}/acknowledge")
+                except Exception as e:
+                    logger.error("Failed to acknowledge job", error=str(e))
+
                 try:
                     await executor_callback(job)
                 except Exception as e:

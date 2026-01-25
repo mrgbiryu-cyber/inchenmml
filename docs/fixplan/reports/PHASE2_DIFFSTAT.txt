@@ -1,0 +1,75 @@
+# PHASE 2 DIFFSTAT
+
+Generated: 2026-01-24T16:58:00+09:00
+
+## Git Diff Summary
+
+```
+backend/app/services/knowledge_service.py | 80 +++++++++++++++++++++---
+1 file changed, 70 insertions(+), 10 deletions(-)
+```
+
+## Detailed Changes
+
+### backend/app/services/knowledge_service.py
+- **Lines Added**: ~70
+- **Lines Removed**: ~10
+- **Net Change**: +60 lines
+
+#### Breakdown by Section:
+1. **Import Addition** (Line 14):
+   - Added `import hashlib` for SHA256 hashing
+   - +1 line
+
+2. **Enhanced _evaluate_importance() Function** (Lines 123-189):
+   - Added metadata parameter with role-based filtering
+   - Expanded noise keywords from ~15 to 50+
+   - Added 5 regex patterns for agent operations
+   - Enhanced high-value signal keywords
+   - +55 lines (net)
+
+3. **Updated Call Sites** (Lines 93-95, 562-564):
+   - process_message_pipeline() - passes metadata
+   - knowledge_worker() - passes metadata
+   - +6 lines
+
+4. **LLM Prompt Enhancement** (Lines 229-239):
+   - Added EXCLUDE section with explicit operational content filtering
+   - +12 lines
+
+## Summary by Task
+
+| Task | Lines Added | Lines Removed | Net |
+|------|-------------|---------------|-----|
+| 2.1 (Noise Filter) | ~40 | ~5 | +35 |
+| 2.2 (Role Filtering) | ~15 | ~3 | +12 |
+| 2.3 (LLM Prompt) | ~12 | 0 | +12 |
+| 2.4 (Hashlib Import) | ~1 | 0 | +1 |
+| **TOTAL** | **~68** | **~8** | **+60** |
+
+## Files NOT Modified (Deferred Tasks)
+
+- `backend/app/core/neo4j_client.py` - Agent node cleanup (Task 2.5) not implemented
+- `backend/scripts/cleanup_kg_pollution.py` - Cleanup script (Task 2.6) not created
+- `backend/app/services/knowledge_service.py` (_upsert_to_neo4j) - Content-based node ID (Task 2.4) incomplete
+
+## Impact Analysis
+
+**Complexity**: MEDIUM
+- Single file modified
+- Backwards compatible (metadata parameter has default)
+- No database schema changes
+- No breaking API changes
+
+**Risk**: LOW
+- Additive changes only
+- Early returns prevent unnecessary processing
+- LLM prompt changes transparent to callers
+
+**Test Coverage**: MANUAL REQUIRED
+- No automated tests added (Phase 2 focus was implementation)
+- Validation queries provided in PHASE2_QUERIES.md
+
+---
+
+**Total Project Impact**: Minimal - localized to knowledge extraction filtering

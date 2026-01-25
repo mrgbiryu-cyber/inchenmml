@@ -7,7 +7,7 @@ import ModelSelector from '@/components/shared/ModelSelector';
 
 export default function MasterSettingsPage() {
     const [config, setConfig] = useState<any>({
-        model: 'gpt-4o',
+        model: 'google/gemini-2.0-flash-001',
         provider: 'OPENROUTER',
         system_prompt: '',
         temperature: 0.7

@@ -6,6 +6,7 @@ import api from '@/lib/axios-config';
 import LogConsole from '@/components/chat/LogConsole';
 import { useDomainStore } from '@/store/useDomainStore';
 import { useProjectStore } from '@/store/projectStore';
+import { useAuthStore } from '@/store/useAuthStore';
 
 interface Message {
     id: string;
@@ -29,9 +30,66 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
     const [messages, setMessages] = useState<Message[]>([]);
     const [loading, setLoading] = useState(false);
     const [showLogs, setShowLogs] = useState(false);
+    const [taskStarted, setTaskStarted] = useState(false);
     const [logs, setLogs] = useState<string[]>([]);
+    const [socket, setSocket] = useState<WebSocket | null>(null);
+
+    // WebSocket for real-time logs
+    useEffect(() => {
+        if (taskStarted && projectId && !socket) {
+            const currentHostname = (window.location.hostname === 'localhost' || window.location.hostname === '0.0.0.0') 
+                ? '127.0.0.1' 
+                : window.location.hostname;
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${currentHostname}:8002/api/v1/orchestration/ws/${projectId}`;
+            
+            console.log(`DEBUG: Connecting to WebSocket: ${wsUrl}`);
+            const newSocket = new WebSocket(wsUrl);
+
+            newSocket.onopen = () => {
+                console.log("DEBUG: WebSocket Connected");
+                setLogs(prev => [...prev, "📡 실시간 로그 연결 성공"]);
+            };
+
+            newSocket.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    console.log("DEBUG: WS Message", data);
+                    if (data.data?.message) {
+                        setLogs(prev => [...prev, data.data.message]);
+                    }
+                    if (data.type === 'WORKFLOW_FINISHED' || data.type === 'WORKFLOW_FAILED') {
+                        // [Fix] Unlock UI to allow re-triggering START TASK after finish or failure
+                        setTaskStarted(false);
+                        setReadyToStart(false);
+                        console.log(`DEBUG: Workflow ${data.type} - UI Unlocked`);
+                    }
+                } catch (e) {
+                    console.error("Failed to parse WS message", e);
+                    setLogs(prev => [...prev, event.data]);
+                }
+            };
+
+            newSocket.onclose = () => {
+                console.log("DEBUG: WebSocket Disconnected");
+                setSocket(null);
+            };
+
+            setSocket(newSocket);
+        }
+
+        return () => {
+            if (socket) {
+                socket.close();
+            }
+        };
+    }, [taskStarted, projectId]);
     const [limit, setLimit] = useState(20);
     const [hasMore, setHasMore] = useState(true);
+    
+    // START TASK Gate State
+    const [readyToStart, setReadyToStart] = useState(false);
+    const [finalSummary, setFinalSummary] = useState('');
     
     // Mention State
     const [showMentions, setShowMentions] = useState(false);
@@ -41,8 +99,26 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const currentDomain = useDomainStore((state) => state.currentDomain);
-
     const activeProject = projects.find(p => p.id === projectId);
+
+    // [Fix] 메시지 목록이 바뀔 때마다 마지막 메시지에서 READY_TO_START 신호를 찾아 버튼을 복구합니다.
+    useEffect(() => {
+        if (messages.length > 0) {
+            const lastMsg = messages[messages.length - 1];
+            if (lastMsg.role === 'assistant') {
+                const jsonMatch = lastMsg.content.match(/\{[\s\S]*?"status"\s*:\s*"READY_TO_START"[\s\S]*?\}/);
+                if (jsonMatch) {
+                    try {
+                        const signal = JSON.parse(jsonMatch[0]);
+                        setReadyToStart(true);
+                        setFinalSummary(signal.final_summary);
+                    } catch (e) {
+                        console.error("Failed to parse existing signal", e);
+                    }
+                }
+            }
+        }
+    }, [messages]);
 
     const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
         messagesEndRef.current?.scrollIntoView({ behavior, block: 'nearest' });
@@ -56,7 +132,10 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
     useEffect(() => {
         const initChat = async () => {
             if (projectId) {
-                setMessages([]); // Reset messages when project changes
+                // [Fix] 화면 전환 시 메시지가 깜빡이며 사라지는 것을 방지하기 위해 
+                // 즉시 초기화하지 않고 데이터 로딩 후 교체합니다.
+                setReadyToStart(false); 
+                setFinalSummary('');
                 fetchHistory(20);
             }
             // If projects list is empty, fetch it to enable mentions
@@ -73,11 +152,14 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
     }, [projectId, threadId, projects.length]); // Added projects.length as dependency to trigger if empty
 
     const fetchHistory = async (currentLimit: number) => {
+        if (!projectId) return;
         try {
+            console.log(`DEBUG: Fetching global history for project=${projectId}, limit=${currentLimit}`);
+            // [Fix] thread_id를 보내지 않고 프로젝트 ID 기반의 전체 타임라인을 요청함
             const params: any = { limit: currentLimit };
-            if (threadId) params.thread_id = threadId;
             
             const response = await api.get(`/projects/${projectId}/chat-history`, { params });
+            console.log(`DEBUG: History received: ${response.data.length} messages`);
             
             const historyMessages: Message[] = response.data.map((msg: any) => ({
                 id: msg.id || Math.random().toString(),
@@ -91,10 +173,6 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
             setHasMore(response.data.length === currentLimit);
         } catch (error: any) {
             console.error("Failed to fetch chat history", error);
-            if (error.response?.status === 404) {
-                console.warn("Project not found in backend. Resetting context.");
-                setCurrentProjectId(null);
-            }
         }
     };
 
@@ -133,53 +211,140 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
     };
 
     const handleSend = async (type: 'chat' | 'job' = 'chat') => {
-        if (!input.trim() || loading) return;
+        if (!input.trim() && type === 'chat') return;
+        if (loading) return;
 
         const effectiveProjectId = projectId || 'system-master';
+        
+        // Clear input for chat type
+        if (type === 'chat') {
+            setInput('');
+            setReadyToStart(false); // Reset gate on new chat
+            setTaskStarted(false);  // Reset task state
+        }
         
         const userMsg: Message = { 
             id: Date.now().toString(), 
             role: 'user', 
-            content: input,
+            content: type === 'job' ? '🚀 START TASK' : input,
             thread_id: threadId 
         };
         
         setMessages(prev => [...prev, userMsg]);
-        setInput('');
         setLoading(true);
 
         try {
             if (type === 'job') {
-                // 1. Check if graph exists/needs save (For now, assume it's saved)
-                // 2. Start Task
-                const response = await api.post(`/projects/${effectiveProjectId}/execute`);
-                
-                const aiMsg: Message = {
-                    id: (Date.now() + 1).toString(),
-                    role: 'assistant',
-                    content: `🚀 Workflow started for project **${activeProject?.name || effectiveProjectId}**.\nExecution ID: \`${response.data.execution_id}\`\nMonitoring real-time logs below.`,
-                    hasLogs: true
-                };
-                setMessages(prev => [...prev, aiMsg]);
-                setLogs(prev => [...prev, `Workflow initiated`, `Checking agent configurations...`, `Connected to local worker`]);
+                // Show logs window immediately
+                setTaskStarted(true);
                 setShowLogs(true);
+                setLogs(['Initializing workflow execution...', 'Authenticating context...']);
+                setReadyToStart(false); 
+                
+                try {
+                    const response = await api.post(`/projects/${effectiveProjectId}/execute`);
+                    
+                    const aiMsg: Message = {
+                        id: (Date.now() + 1).toString(),
+                        role: 'assistant',
+                        content: `🚀 Workflow started for project **${activeProject?.name || effectiveProjectId}**.\nExecution ID: \`${response.data.execution_id}\`\nMonitoring real-time logs in the console.`,
+                        hasLogs: true
+                    };
+                    setMessages(prev => [...prev, aiMsg]);
+                    setLogs(prev => [...prev, `Workflow accepted by engine. Execution ID: ${response.data.execution_id}`, `Streaming real-time logs...`]);
+                } catch (execError: any) {
+                    console.error("Execution trigger failed", execError);
+                    setLogs(prev => [...prev, `❌ FAILED: ${execError.response?.data?.detail || execError.message}`]);
+                    setMessages(prev => [...prev, {
+                        id: Date.now().toString(),
+                        role: 'assistant',
+                        content: `⚠️ 작업 시작 중 오류가 발생했습니다: ${execError.response?.data?.detail || execError.message}`
+                    }]);
+                }
             } else {
-                // Regular Chat
-                const response = await api.post('/master/chat', {
-                    message: userMsg.content,
-                    history: messages.map(m => ({ role: m.role, content: m.content })),
-                    project_id: effectiveProjectId,
-                    thread_id: threadId
+                // [TODO 8] Streaming Chat with Tool Call Interceptor (2nd Layer Protection)
+                const token = useAuthStore.getState().token;
+                if (!token) {
+                    console.error("Auth token is missing!");
+                    throw new Error("Authentication token is missing. Please log in again.");
+                }
+                const authHeader = `Bearer ${token}`;
+                
+                // Use absolute URL from axios config or fallback
+                const currentHostname = (window.location.hostname === 'localhost' || window.location.hostname === '0.0.0.0') 
+                    ? '127.0.0.1' 
+                    : window.location.hostname;
+                const baseURL = api.defaults.baseURL || `http://${currentHostname}:8002/api/v1`;
+                
+                const response = await fetch(`${baseURL}/master/chat-stream`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': authHeader
+                    },
+                    body: JSON.stringify({
+                        message: userMsg.content,
+                        history: messages.map(m => ({ role: m.role, content: m.content })),
+                        project_id: effectiveProjectId,
+                        thread_id: threadId
+                    })
                 });
 
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+                const reader = response.body?.getReader();
+                const decoder = new TextDecoder();
+                
+                let accumulatedContent = '';
+                const aiMsgId = (Date.now() + 1).toString();
+                
+                // Initialize assistant message
                 const aiMsg: Message = {
-                    id: (Date.now() + 1).toString(),
+                    id: aiMsgId,
                     role: 'assistant',
-                    content: response.data.message,
+                    content: '',
                     hasLogs: false,
                     thread_id: threadId
                 };
                 setMessages(prev => [...prev, aiMsg]);
+
+                if (reader) {
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        
+                        const chunk = decoder.decode(value, { stream: true });
+                        
+                        // [TODO 8] Frontend 2차 안전망: Tool 토큰 필터링
+                        // ASCII 및 유니코드 변형 포함 필터링
+                        const filteredChunk = chunk.replace(/<[|｜]tool[▁_]calls[▁_]begin[|｜]>|<[|｜]tool[▁_]calls[▁_]end[|｜]>|<[|｜]tool[▁_]result[▁_]begin[|｜]>|<[|｜]tool[▁_]result[▁_]end[|｜]>/g, '');
+                        
+                        accumulatedContent += filteredChunk;
+                        
+                        // [Fix] 정규식 강화: 공백, 줄바꿈, 따옴표 종류에 유연하게 대응
+                        const jsonMatch = accumulatedContent.match(/\{[\s\S]*?"status"\s*:\s*"READY_TO_START"[\s\S]*?\}/);
+                        if (jsonMatch) {
+                            try {
+                                console.log("DEBUG: READY_TO_START detected!");
+                                const signal = JSON.parse(jsonMatch[0]);
+                                setReadyToStart(true);
+                                setFinalSummary(signal.final_summary);
+                                
+                                // Update UI message (hide JSON)
+                                const cleanContent = accumulatedContent.replace(jsonMatch[0], '').trim();
+                                setMessages(prev => prev.map(m => 
+                                    m.id === aiMsgId ? { ...m, content: cleanContent || "설정이 완료되었습니다. 아래 [START TASK] 버튼을 눌러 작업을 시작해 주세요." } : m
+                                ));
+                            } catch (e) {
+                                // JSON이 아직 덜 받아와졌을 수 있으므로 무시하고 다음 청크 대기
+                            }
+                        } else {
+                            setMessages(prev => prev.map(m => 
+                                m.id === aiMsgId ? { ...m, content: accumulatedContent } : m
+                            ));
+                        }
+                    }
+                }
             }
         } catch (error: any) {
             console.error('Failed to send message', error);
@@ -246,7 +411,13 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
                                         ? 'bg-indigo-600/10 text-zinc-100 border border-indigo-500/30'
                                         : 'bg-zinc-900 text-zinc-300 border border-zinc-800 shadow-sm'
                                 }`}>
-                                    <div className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</div>
+                                    <div className="whitespace-pre-wrap text-sm leading-relaxed">
+                                        {/* [Fix] 렌더링 시 JSON 신호를 숨깁니다. */}
+                                        {msg.role === 'assistant' 
+                                            ? msg.content.replace(/\{[\s\S]*?"status"\s*:\s*"READY_TO_START"[\s\S]*?\}/, '').trim() || "설정이 완료되었습니다. 아래 [START TASK] 버튼을 눌러 작업을 시작해 주세요."
+                                            : msg.content
+                                        }
+                                    </div>
                                     {msg.hasLogs && (
                                         <button
                                             onClick={() => setShowLogs(true)}
@@ -334,16 +505,45 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
                             >
                                 <Send size={20} />
                             </button>
-                            <button
-                                onClick={() => handleSend('job')}
-                                disabled={!input.trim() || loading || !projectId}
-                                className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-500 disabled:opacity-20 disabled:grayscale transition-all font-bold text-xs shadow-lg shadow-indigo-900/40"
-                            >
-                                <Zap size={14} />
-                                <span>START TASK</span>
-                            </button>
                         </div>
                     </div>
+                    
+                    {/* Action Area for Dynamic Buttons */}
+                    {(readyToStart || taskStarted) && (
+                        <div className="mt-4 p-4 bg-indigo-600/10 border border-indigo-500/30 rounded-2xl flex items-center justify-between animate-in fade-in slide-in-from-bottom-2 duration-500">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-indigo-600 rounded-lg">
+                                    <Zap size={18} className="text-white" />
+                                </div>
+                                <div className="flex flex-col">
+                                    <span className="text-xs font-bold text-indigo-400 uppercase tracking-wider">
+                                        {taskStarted ? "Task in Progress" : "Ready to Execute"}
+                                    </span>
+                                    <p className="text-sm text-zinc-300 line-clamp-1">
+                                        {taskStarted ? "Execution logs are being generated." : (finalSummary || "Plan completed. Ready to start task.")}
+                                    </p>
+                                </div>
+                            </div>
+                            {taskStarted ? (
+                                <button
+                                    onClick={() => setShowLogs(true)}
+                                    className="flex items-center gap-2 px-6 py-2.5 bg-zinc-800 text-white rounded-xl hover:bg-zinc-700 transition-all font-bold text-sm border border-zinc-700 shadow-lg"
+                                >
+                                    <FileText size={16} />
+                                    <span>VIEW LOGS</span>
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={() => handleSend('job')}
+                                    disabled={loading}
+                                    className="flex items-center gap-2 px-6 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-500 transition-all font-bold text-sm shadow-lg shadow-indigo-900/40"
+                                >
+                                    <Zap size={16} />
+                                    <span>START TASK</span>
+                                </button>
+                            )}
+                        </div>
+                    )}
                 </div>
             </div>
 

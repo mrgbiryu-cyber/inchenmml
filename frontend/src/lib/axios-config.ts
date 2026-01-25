@@ -4,11 +4,17 @@ import { useAuthStore } from '@/store/useAuthStore';
 // Helper to get base URL dynamically
 const getBaseURL = () => {
     if (typeof window !== 'undefined') {
-        // If we are in the browser, use the current hostname but fixed port 8002
-        return `http://${window.location.hostname}:8002/api/v1`;
+        // Use 127.0.0.1 instead of localhost for better compatibility on Windows
+        // But if we are accessing via an IP (like Tailscale), use that IP
+        const hostname = (window.location.hostname === 'localhost' || window.location.hostname === '0.0.0.0') 
+            ? '127.0.0.1' 
+            : window.location.hostname;
+        
+        // Ensure we always use 8002 for the backend during development
+        return `http://${hostname}:8002/api/v1`;
     }
     // Fallback for SSR
-    return process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8002/api/v1';
+    return process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8002/api/v1';
 };
 
 // Create axios instance

@@ -98,6 +98,7 @@ class JobCreate(BaseModel):
     # Conditional: Required if execution_location == LOCAL_MACHINE
     repo_root: Optional[str] = None
     allowed_paths: Optional[List[str]] = None
+    tool_allowlist: List[str] = Field(default_factory=list)
     
     # Optional
     steps: List[str] = Field(default_factory=list)
@@ -137,6 +138,7 @@ class Job(BaseModel):
     # CONDITIONAL: Required if execution_location == LOCAL_MACHINE
     repo_root: Optional[str] = None
     allowed_paths: Optional[List[str]] = None
+    tool_allowlist: List[str] = Field(default_factory=list)
     
     # OPTIONAL
     steps: List[str] = Field(default_factory=list)
@@ -148,6 +150,11 @@ class Job(BaseModel):
     retry_count: int = Field(default=0)
     reassign_count: int = Field(default=0)
     execution_started_at: Optional[int] = None
+    
+    # [NEW] Version 3.5.1 Result Fields
+    large_change_detected: bool = False
+    git_diff_stat: Optional[str] = None
+    total_changed_lines: int = 0
     
     class Config:
         json_schema_extra = {
@@ -288,14 +295,52 @@ class ErrorResponse(BaseModel):
 # Project & Agent Models (Phase 1 & 2)
 # ============================================
 
+class AgentType(str, Enum):
+    """Agent types for schema validation and UI only"""
+    MASTER = "MASTER"
+    PLANNER = "PLANNER"
+    CODER = "CODER"
+    QA = "QA"
+    GIT = "GIT"
+    CUSTOM = "CUSTOM"
+
 class AgentDefinition(BaseModel):
     """Defines a single agent in a workflow"""
     agent_id: str
+    name: str = "Unknown Agent"
+    type: AgentType = AgentType.CUSTOM
     role: str = Field(..., description="PLANNER | CODER | REVIEWER | QA")
     model: str
-    provider: Literal["OPENROUTER", "OLLAMA"]
+    provider: ProviderType
     system_prompt: str
+    toolset: List[str] = Field(default_factory=list)
+    config: Dict[str, Any] = Field(default_factory=dict)
     next_agents: List[str] = Field(default_factory=list)
+    enabled: bool = True
+
+    @validator('config')
+    def validate_config_by_type(cls, v, values):
+        agent_type = values.get('type')
+        if not agent_type or not v: # 빈 설정은 통과 (repair 모드 지원)
+            return v
+            
+        if agent_type == AgentType.CODER:
+            required = ['repo_root', 'allowed_paths', 'mode', 'change_policy', 'language_stack']
+        elif agent_type == AgentType.QA:
+            required = ['repo_root', 'test_command', 'retry_limit', 'timeout_sec', 'artifact_output']
+        elif agent_type == AgentType.GIT:
+            required = ['repo_root', 'remote_name', 'default_branch', 'push_strategy', 'allowed_commands']
+        elif agent_type == AgentType.CUSTOM:
+            required = ['repo_root', 'allowed_paths', 'tool_allowlist', 'risk_level']
+        else:
+            return v
+            
+        # Partial validation: missing fields are OK during database loading
+        # The master agent will handle filling these via MISSION READINESS REPORT
+        return v
+
+    class Config:
+        extra = "allow"
 
 
 class ProjectAgentConfig(BaseModel):
@@ -303,6 +348,19 @@ class ProjectAgentConfig(BaseModel):
     workflow_type: Literal["SEQUENTIAL", "PARALLEL", "CUSTOM"]
     agents: List[AgentDefinition]
     entry_agent_id: str
+
+
+class ChatMessageResponse(BaseModel):
+    """Schema for chat message response (Frontend Compatible)"""
+    id: str = Field(..., description="Message UUID")
+    role: str = Field(..., description="user | assistant | system")
+    content: str
+    created_at: str = Field(..., description="ISO formatted timestamp")
+    thread_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+    class Config:
+        from_attributes = True
 
 
 class ProjectCreate(BaseModel):

@@ -13,6 +13,10 @@ class AgentState(TypedDict):
     next_agent: str
     artifacts: Dict[str, Any]
     ux_issues: Annotated[List[Dict[str, str]], operator.add] # UX audit results tracker
+    is_started: bool
+    approval_granted: bool
+    retry_count: int
+    large_change_detected: bool
 
 class AgentConfigService:
     """

@@ -1,6 +1,7 @@
 from neo4j import AsyncGraphDatabase
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import asyncio
 from app.core.config import settings
 from app.models.schemas import Project, AgentDefinition
 
@@ -63,7 +64,8 @@ class Neo4jClient:
         SET a.role = agent.role, 
             a.model = agent.model, 
             a.provider = agent.provider,
-            a.system_prompt = agent.system_prompt
+            a.system_prompt = agent.system_prompt,
+            a.config_json = agent.config_json
         MERGE (p)-[:HAS_AGENT]->(a)
         
         WITH p
@@ -74,9 +76,14 @@ class Neo4jClient:
         MERGE (src)-[:NEXT_STEP]->(dst)
         """
         
+        import json
         agents_data = []
         if project.agent_config:
-            agents_data = [agent.dict() for agent in project.agent_config.agents]
+            for agent in project.agent_config.agents:
+                a_dict = agent.dict()
+                # config를 JSON 문자열로 변환하여 전달
+                a_dict["config_json"] = json.dumps(a_dict.get("config", {}), ensure_ascii=False)
+                agents_data.append(a_dict)
         
         async with self.driver.session() as session:
             await session.run(clear_query, {"project_id": project.id})
@@ -94,6 +101,20 @@ class Neo4jClient:
                 "entry_agent_id": project.agent_config.entry_agent_id if project.agent_config else None,
                 "agents": agents_data
             })
+
+    async def delete_project_agents(self, project_id: str):
+        """프로젝트에 연결된 모든 에이전트 노드와 관계를 물리적으로 삭제합니다."""
+        if self.driver:
+            query = """
+            MATCH (p:Project {id: $project_id})
+            OPTIONAL MATCH (p)-[:HAS_AGENT]->(a:AgentRole)
+            DETACH DELETE a
+            SET p.agent_config = null,
+                p.workflow_type = 'SEQUENTIAL',
+                p.entry_agent_id = null
+            """
+            async with self.driver.session() as session:
+                await session.run(query, {"project_id": project_id})
 
     async def get_project(self, project_id: str) -> Optional[Dict[str, Any]]:
         if not self.driver:
@@ -116,6 +137,7 @@ class Neo4jClient:
             agents_nodes = record["agents"]
             steps = record["steps"]
             
+            import json
             if agents_nodes:
                 agents_list = []
                 for agent_node in agents_nodes:
@@ -124,6 +146,17 @@ class Neo4jClient:
                     a_id = a_data["id"]
                     a_data["agent_id"] = a_id
                     del a_data["id"]
+                    
+                    # config_json 복구
+                    if "config_json" in a_data:
+                        try:
+                            a_data["config"] = json.loads(a_data["config_json"])
+                        except:
+                            a_data["config"] = {}
+                        del a_data["config_json"]
+                    else:
+                        a_data["config"] = {}
+                        
                     a_data["next_agents"] = [s["to"] for s in steps if s["from"] == a_id and s["to"]]
                     agents_list.append(a_data)
                 
@@ -178,8 +211,6 @@ class Neo4jClient:
                 converted[key] = value
         return converted
 
-    _chat_cache: Dict[str, List[Dict[str, Any]]] = {}
-
     async def save_chat_message(self, project_id: str, role: str, content: str, thread_id: Optional[str] = None, user_id: Optional[str] = None):
         if self.driver:
             try:
@@ -196,12 +227,12 @@ class Neo4jClient:
                              p.user_id = COALESCE($user_id, p.user_id)
                 
                 CREATE (m:ChatMessage {
-                    id: randomUUID(),
+                    message_id: randomUUID(),
                     role: $role,
                     content: $content,
                     thread_id: $thread_id,
                     user_id: $user_id,
-                    created_at: datetime()
+                    timestamp: datetime()
                 })
                 CREATE (p)-[:HAS_MESSAGE]->(m)
                 SET p.updated_at = datetime()
@@ -214,33 +245,27 @@ class Neo4jClient:
                         "thread_id": thread_id,
                         "user_id": user_id or "system"
                     })
-                if project_id in self._chat_cache:
-                    del self._chat_cache[project_id]
                 return
             except Exception as e:
                 print(f"Neo4j save failed: {e}")
 
     async def get_chat_history(self, project_id: str, limit: int = 50, thread_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        if not thread_id and project_id in self._chat_cache:
-            return self._chat_cache[project_id][-limit:]
-
         messages = []
         if self.driver:
             try:
-                # Use CASE or simple IF for the WHERE clause
                 if thread_id:
                     query = """
                     MATCH (p:Project {id: $project_id})-[:HAS_MESSAGE]->(m:ChatMessage)
                     WHERE m.thread_id = $thread_id
                     RETURN m
-                    ORDER BY m.created_at ASC
+                    ORDER BY m.timestamp ASC
                     LIMIT $limit
                     """
                 else:
                     query = """
                     MATCH (p:Project {id: $project_id})-[:HAS_MESSAGE]->(m:ChatMessage)
                     RETURN m
-                    ORDER BY m.created_at ASC
+                    ORDER BY m.timestamp ASC
                     LIMIT $limit
                     """
                 
@@ -253,15 +278,112 @@ class Neo4jClient:
                     async for record in result:
                         msg_node = record["m"]
                         msg_data = dict(msg_node)
-                        if "created_at" in msg_data:
-                            msg_data["created_at"] = str(msg_data["created_at"])
+                        if "timestamp" in msg_data:
+                            msg_data["timestamp"] = str(msg_data["timestamp"])
                         messages.append(msg_data)
-                
-                if messages and not thread_id:
-                    self._chat_cache[project_id] = messages
                 return messages
             except Exception as e:
                 print(f"Neo4j fetch failed: {e}")
         return []
+
+    async def query_knowledge(self, project_id: str, query_text: str, limit: int = 5) -> List[Dict[str, Any]]:
+        if not self.driver: return []
+        query = """
+        MATCH (p:Project {id: $project_id})-[r]->(n)
+        WHERE (type(r) STARTS WITH 'HAS_' OR type(r) = 'RELATES_TO')
+          AND (
+            (n.title IS NOT NULL AND n.title CONTAINS $query_text) OR 
+            (n.name IS NOT NULL AND n.name CONTAINS $query_text) OR 
+            (n.description IS NOT NULL AND n.description CONTAINS $query_text) OR
+            (n.content IS NOT NULL AND n.content CONTAINS $query_text) OR
+            (n.claim IS NOT NULL AND n.claim CONTAINS $query_text)
+          )
+        RETURN n, labels(n) as types
+        LIMIT $limit
+        """
+        async def _execute():
+            items = []
+            try:
+                async with self.driver.session() as session:
+                    result = await session.run(query, {"project_id": project_id, "query_text": query_text, "limit": limit})
+                    async for record in result:
+                        node = record["n"]
+                        data = dict(node)
+                        data["types"] = record["types"]
+                        items.append(data)
+                return items
+            except Exception as e:
+                print(f"❌ Neo4j inner query error: {e}")
+                return []
+        try:
+            return await asyncio.wait_for(_execute(), timeout=5.0)
+        except asyncio.TimeoutError:
+            print(f"⚠️ Neo4j query timed out for query: {query_text}")
+            return []
+        except Exception as e:
+            print(f"❌ Neo4j query wrapper error: {e}")
+            return []
+
+    async def get_knowledge_graph(self, project_id: str) -> Dict[str, Any]:
+        if not self.driver: return {"nodes": [], "links": []}
+        query = """
+        MATCH (n)
+        WHERE (n.project_id = $project_id OR (:Project {id: $project_id})-[:HAS_KNOWLEDGE]->(n))
+          AND labels(n)[0] IN ['Concept', 'Requirement', 'Decision', 'Logic', 'Fact', 'Task', 'File', 'History']
+        OPTIONAL MATCH (n)-[r]->(m)
+        WHERE labels(m)[0] IN ['Concept', 'Requirement', 'Decision', 'Logic', 'Fact', 'Task', 'File', 'History']
+          AND (m.project_id = $project_id OR (:Project {id: $project_id})-[:HAS_KNOWLEDGE]->(m))
+        RETURN n, labels(n) as labels, collect({type: type(r), target: m.id}) as rels
+        """
+        nodes, links, node_ids = [], [], set()
+        async with self.driver.session() as session:
+            result = await session.run(query, {"project_id": project_id})
+            async for record in result:
+                n = record["n"]
+                raw_id = n.get("id") or n.element_id
+                n_id = str(raw_id[0]) if isinstance(raw_id, list) else str(raw_id)
+                labels = record["labels"]
+                if n_id not in node_ids:
+                    color, val = "#3b82f6", 10
+                    main_label = labels[0] if labels else "Concept"
+                    if main_label == "Requirement": color, val = "#ef4444", 15
+                    elif main_label == "Decision": color, val = "#10b981", 18
+                    elif main_label == "Logic": color, val = "#f59e0b", 12
+                    elif main_label == "Concept": color, val = "#8b5cf6", 12
+                    elif main_label == "Fact": color, val = "#06b6d4", 8
+                    elif main_label == "Task": color, val = "#f97316", 10
+                    nodes.append({"id": n_id, "name": n.get("title") or n.get("name") or n.get("summary") or n_id, "type": main_label, "val": val, "color": color, "properties": dict(n)})
+                    node_ids.add(n_id)
+                for rel in record["rels"]:
+                    target_id = rel.get("target")
+                    if target_id:
+                        t_id = str(target_id[0]) if isinstance(target_id, list) else str(target_id)
+                        if t_id: links.append({"source": n_id, "target": t_id, "label": rel["type"]})
+        return {"nodes": nodes, "links": links}
+
+    async def create_indexes(self):
+        if not self.driver: return
+        try:
+            async with self.driver.session() as session:
+                await session.run("CREATE CONSTRAINT project_id_unique IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE")
+        except Exception as e:
+            if "already exists an index" in str(e):
+                try:
+                    async with self.driver.session() as session:
+                        await session.run("DROP INDEX FOR (n:Project) ON (n.id)")
+                        await session.run("CREATE CONSTRAINT project_id_unique IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE")
+                except: pass
+        index_queries = [
+            "CREATE INDEX IF NOT EXISTS FOR (n:Concept) ON (n.title)",
+            "CREATE INDEX IF NOT EXISTS FOR (n:Concept) ON (n.name)",
+            "CREATE INDEX IF NOT EXISTS FOR (n:Requirement) ON (n.title)",
+            "CREATE INDEX IF NOT EXISTS FOR (n:Decision) ON (n.title)",
+            "CREATE INDEX IF NOT EXISTS FOR (n:Fact) ON (n.claim)",
+            "CREATE INDEX IF NOT EXISTS FOR (n:ChatMessage) ON (n.message_id)"
+        ]
+        async with self.driver.session() as session:
+            for q in index_queries:
+                try: await session.run(q)
+                except: pass
 
 neo4j_client = Neo4jClient()

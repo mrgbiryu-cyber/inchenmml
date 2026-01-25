@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import api from '@/lib/axios-config';
 import { Project } from '@/types/project';
+import { MessageSquare, Settings, ArrowRight } from 'lucide-react';
 
 export default function ProjectsPage() {
     const [projects, setProjects] = useState<Project[]>([]);
@@ -88,27 +89,43 @@ export default function ProjectsPage() {
             ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     {projects.map(project => (
-                        <Link
+                        <div
                             key={project.id}
-                            href={`/projects/${project.id}`}
-                            className="block bg-zinc-900 border border-zinc-800 rounded-lg p-6 hover:border-purple-500 transition-colors group"
+                            className="block bg-zinc-900 border border-zinc-800 rounded-2xl p-6 hover:border-indigo-500/50 transition-all group relative overflow-hidden"
                         >
                             <div className="flex justify-between items-start mb-4">
-                                <h3 className="text-xl font-semibold group-hover:text-purple-400 transition-colors">
-                                    {project.name}
-                                </h3>
-                                <span className={`text-xs px-2 py-1 rounded ${project.project_type === 'NEW' ? 'bg-green-900 text-green-200' : 'bg-blue-900 text-blue-200'
+                                <div>
+                                    <h3 className="text-xl font-bold text-white group-hover:text-indigo-400 transition-colors">
+                                        {project.name}
+                                    </h3>
+                                    <div className="text-[10px] font-mono text-zinc-600 mt-1 uppercase tracking-tighter">ID: {project.id.substring(0, 8)}...</div>
+                                </div>
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${project.project_type === 'SYSTEM' ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30' : project.project_type === 'NEW' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
                                     }`}>
                                     {project.project_type}
                                 </span>
                             </div>
-                            <p className="text-zinc-400 text-sm mb-4 line-clamp-2">
-                                {project.description || "No description"}
+                            <p className="text-zinc-400 text-sm mb-6 line-clamp-2 min-h-[2.5rem]">
+                                {project.description || "No description provided."}
                             </p>
-                            <div className="flex items-center text-xs text-zinc-500">
-                                <span>Updated {new Date(project.updated_at).toLocaleDateString()}</span>
+                            
+                            <div className="flex items-center gap-2 pt-4 border-t border-zinc-800/50">
+                                <Link
+                                    href={`/chat?projectId=${project.id}`}
+                                    className="flex-1 flex items-center justify-center gap-2 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-900/20"
+                                >
+                                    <MessageSquare size={14} />
+                                    <span>Chat</span>
+                                </Link>
+                                <Link
+                                    href={`/projects/${project.id}`}
+                                    className="flex-1 flex items-center justify-center gap-2 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl text-xs font-bold transition-all border border-zinc-700"
+                                >
+                                    <Settings size={14} />
+                                    <span>Settings</span>
+                                </Link>
                             </div>
-                        </Link>
+                        </div>
                     ))}
                 </div>
             )}

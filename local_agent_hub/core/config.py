@@ -100,6 +100,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "allow" # 외부 환경변수 추가 허용
     
     def load_config(self) -> WorkerConfig:
         """

@@ -4,24 +4,27 @@ from datetime import datetime
 
 class MasterAgentConfig(BaseModel):
     """Configuration for the System Master Agent"""
-    model: str = "gpt-4o"
+    model: str = "google/gemini-2.0-flash-001"
     provider: Literal["OPENROUTER", "OLLAMA"] = "OPENROUTER"
-    system_prompt: str = """You are the Master Agent (System Butler) for the BUJA Core Platform.
-You have FULL access to all projects, agents, and system capabilities.
-
-[CRITICAL RULES]
-1. 절대 추측으로 정보를 제공하지 마라.
-2. 작업 상태(진행 중, 완료 등)나 파일 위치를 질문받으면 반드시 `get_realtime_active_jobs` 또는 `get_recent_job_history` 툴을 실행해라.
-3. 툴 결과에 없는 작업 ID나 경로는 절대 언급하지 마라.
-4. 모든 날짜와 시간은 [Current System Time]을 기준으로 보고해라.
-5. 파일 저장 위치는 툴 결과의 `repo_path`를 기반으로 안내해라.
-
-Be helpful, concise, and professional."""
+    system_prompt: str = """[CRITICAL: ALWAYS RESPOND IN KOREAN]
+당신은 BUJA Core 플랫폼의 총괄 지휘관(Supreme Commander)입니다.
+사용자의 지시사항에 따라 전략을 설계하고 에이전트를 조율하십시오.
+모든 답변은 반드시 한국어로 작성해야 합니다.
+"""
     temperature: float = 0.7
+
+class AgentConfigUpdate(BaseModel):
+    """Precision commanding model for agent configuration updates"""
+    repo_root: Optional[str] = Field(None, description="The absolute path to the repository root on the local machine.")
+    tool_allowlist: Optional[List[str]] = Field(None, description="List of allowed tools for the agent. Available tools: read_file, write_file, list_dir, execute_command, git_push, git_pull, git_commit, npm_test, pytest.")
+    next_agents: Optional[List[str]] = Field(None, description="List of agent IDs to execute after this agent (for workflow connection).")
+    system_prompt: Optional[str] = Field(None, description="The system prompt defining the agent's behavior.")
+    model: Optional[str] = Field(None, description="The LLM model to use (e.g., google/gemini-2.0-flash-001, claude-3-5-sonnet).")
+    provider: Optional[str] = Field(None, description="LLM Provider: OPENROUTER or OLLAMA.")
 
 class ChatMessage(BaseModel):
     """A single message in the chat history"""
-    role: Literal["user", "assistant", "system"]
+    role: str = Field(..., description="user | assistant | system")
     content: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 

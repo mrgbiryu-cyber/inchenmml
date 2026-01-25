@@ -1,7 +1,16 @@
+# -*- coding: utf-8 -*-
 """
 Security utilities for BUJA Core Platform
-Implements JWT authentication, password hashing, and Ed25519 job signing
 """
+import json
+import sys
+
+# [UTF-8] Force stdout/stderr to UTF-8
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import json
@@ -117,64 +126,47 @@ class SecurityError(Exception):
 def sign_job_payload(job_data: dict) -> str:
     """
     Sign a job payload with Backend's Ed25519 private key
-    
-    This is the ONLY way to create valid jobs. Jobs without valid signatures
-    will be rejected by Local Workers.
-    
-    Args:
-        job_data: Job dictionary (without 'signature' field)
-        
-    Returns:
-        Base64-encoded signature string (format: "base64:...")
-        
-    Raises:
-        SecurityError: If private key is invalid or signing fails
-        
-    Implementation follows JOB_AND_SECURITY.md Section 3.3
     """
     try:
-        # 1. Load private key from environment
+        # 1. Load private key
         private_key_pem = settings.JOB_SIGNING_PRIVATE_KEY
-        
         if not private_key_pem:
             raise SecurityError("JOB_SIGNING_PRIVATE_KEY not configured")
-            
-        # Handle literal \n characters from .env
         private_key_pem = private_key_pem.replace('\\n', '\n')
-        
-        # Handle both raw PEM and environment variable formats
-        if not private_key_pem.startswith("-----BEGIN"):
-            # If stored as base64 or single line, reconstruct PEM
-            raise SecurityError(
-                "JOB_SIGNING_PRIVATE_KEY must be in PEM format. "
-                "Generate with: python -c 'from cryptography.hazmat.primitives.asymmetric import ed25519; ...'"
-            )
         
         private_key = serialization.load_pem_private_key(
             private_key_pem.encode(),
             password=None
         )
         
-        # Verify it's an Ed25519 key
-        if not isinstance(private_key, ed25519.Ed25519PrivateKey):
-            raise SecurityError("Private key is not Ed25519 format")
+        # [CRITICAL] 서명에 포함할 필드만 명확하게 추출
+        # Job 객체 전체가 아니라, 생성 시점의 핵심 데이터만 서명합니다.
+        signable_keys = [
+            'job_id', 'execution_location', 'provider', 'model', 
+            'repo_root', 'allowed_paths', 'steps', 'metadata'
+        ]
         
-        # 2. Create canonical JSON (sorted keys, no whitespace)
-        # This ensures the same job always produces the same signature
-        canonical_json = json.dumps(job_data, sort_keys=True, separators=(',', ':'))
+        # 2. Create canonical JSON
+        # UUID나 Enum 객체가 섞여있을 수 있으므로 default=str로 처리하되, 
+        # 구조를 변형시키지 않기 위해 단순화합니다.
+        payload_to_sign = {k: job_data[k] for k in signable_keys if k in job_data}
+        
+        # Pydantic 모델인 경우 dict로 변환 (이미 dict라면 그대로)
+        if hasattr(payload_to_sign, "dict"):
+            payload_to_sign = payload_to_sign.dict()
+
+        canonical_json = json.dumps(payload_to_sign, sort_keys=True, separators=(',', ':'), ensure_ascii=False, default=str)
         message = canonical_json.encode('utf-8')
         
-        # 3. Sign the message
+        print(f"DEBUG: [Sign] Canonical Length: {len(message)}", flush=True)
+        
+        print(f"DEBUG: [Sign] Canonical Length: {len(message)}")
+        
+        # 3. Sign
         signature_bytes = private_key.sign(message)
-        
-        # 4. Encode as base64
-        signature_b64 = base64.b64encode(signature_bytes).decode('ascii')
-        
-        return f"base64:{signature_b64}"
+        return f"base64:{base64.b64encode(signature_bytes).decode('ascii')}"
         
     except Exception as e:
-        if isinstance(e, SecurityError):
-            raise
         raise SecurityError(f"Job signing failed: {str(e)}")
 
 

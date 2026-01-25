@@ -111,7 +111,7 @@ async def check_job_status(token: str, job_id: str) -> dict:
                 print(f"\n📝 Result:")
                 result = status['result']
                 if isinstance(result, dict):
-                    print(json.dumps(result, indent=2))
+                    print(json.dumps(result, indent=2, ensure_ascii=False))
                 else:
                     print(result)
             

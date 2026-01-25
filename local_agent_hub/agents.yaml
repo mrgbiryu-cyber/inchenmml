@@ -6,7 +6,7 @@
 # Server Connection
 # ============================================
 server:
-  url: http://localhost:8002
+  url: http://127.0.0.1:8002
   worker_token: sk_worker_1234567890abcdef  # Issued by Super Admin
   poll_interval: 5       # Seconds between polls (if no jobs)
   timeout: 30            # Long-polling timeout

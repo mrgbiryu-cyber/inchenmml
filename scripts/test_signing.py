@@ -37,7 +37,7 @@ private_key_pem = private_key_pem.replace('\\n', '\n')
 
 # Load Public Key from agents.yaml
 agents_yaml_path = project_root / 'local_agent_hub' / 'agents.yaml'
-with open(agents_yaml_path) as f:
+with open(agents_yaml_path, encoding='utf-8') as f:
     config = yaml.safe_load(f)
     public_key_pem = config['security']['job_signing_public_key']
 

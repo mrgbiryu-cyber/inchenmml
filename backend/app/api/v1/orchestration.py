@@ -1,5 +1,14 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import json
+import sys
+
+# [UTF-8] Force stdout/stderr to UTF-8
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from structlog import get_logger
 from redis.asyncio import Redis

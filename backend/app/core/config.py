@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     NEO4J_URI: str = "bolt://localhost:7687"
     NEO4J_USER: str = "neo4j"
-    NEO4J_PASSWORD: str = "password"
+    NEO4J_PASSWORD: str = "buja_password_change_this"
     
     # Vector Database
     PINECONE_API_KEY: Optional[str] = None
@@ -84,8 +84,34 @@ class Settings(BaseSettings):
     MAX_TOTAL_JOB_SIZE_BYTES: int = 10485760  # 10 MB
     
     # CORS
-    CORS_ORIGINS: str = "http://localhost:3000"
+    CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,http://100.77.67.1:3000"
     CORS_ALLOW_CREDENTIALS: bool = True
+    
+    # [NEW] Cost Safety Guard Configuration
+    LLM_HIGH_TIER_MODEL: str = "google/gemini-2.0-flash-001"
+    LLM_LOW_TIER_MODEL: str = "gpt-4o-mini"
+    DAILY_BUDGET_USD: float = 5.0
+    COST_FILTER_MIN_CHARS: int = 10
+    BATCH_INTERVAL_SEC: int = 30
+    
+    # [PHASE3_MVP] Model Strategy (Deterministic Baseline)
+    # Primary/Secondary 모델은 "한 곳(config)에서만" 관리합니다.
+    PRIMARY_MODEL: str = "google/gemini-2.0-flash-001"  # ✅ DeepSeek V3보다 가성비 좋은 최신 모델
+    FALLBACK_MODEL: str = "gpt-4o-mini"            # 예시: OpenAI/OpenRouter용
+
+    # Secondary 모델 호출 제한 (태스크당 1회만 허용)
+    ALLOW_SECONDARY_MODEL: bool = True
+    MAX_SECONDARY_CALLS_PER_TASK: int = 1
+
+    # [PHASE3_MVP] Degraded Mode flags (자동제어 아님: 실패 시에도 계속 진행하기 위한 규칙 스위치)
+    FORCE_DEGRADED_MODE: bool = False
+    ALLOW_MISSING_RETRIEVAL: bool = True
+
+    # [PHASE3_MVP] Web Search behavior (Tavily Optional)
+    WEB_SEARCH_PROVIDER: str = "tavily"
+    WEB_SEARCH_TIMEOUT_SECONDS: int = 12
+
+    
     
     # Monitoring
     SENTRY_DSN: Optional[str] = None

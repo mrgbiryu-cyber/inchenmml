@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { MessageSquare } from 'lucide-react';
 import ChatInterface from '@/components/chat/ChatInterface';
 import KnowledgeGraph from '@/components/graph/KnowledgeGraph';
 import LangGraphView from '@/components/langgraph/LangGraphView';
@@ -21,13 +22,14 @@ export default function ProjectDetailPage() {
 
     const [project, setProject] = useState<Project | null>(null);
     const [loading, setLoading] = useState(true);
+    const [editing, setEditing] = useState(false);
+    const [editPath, setEditPath] = useState("");
 
     const { setCurrentProjectId } = useProjectStore();
 
     useEffect(() => {
         if (projectId) {
             fetchProject();
-            setCurrentProjectId(projectId);
         }
     }, [projectId]);
 
@@ -35,11 +37,23 @@ export default function ProjectDetailPage() {
         try {
             const response = await api.get(`/projects/${projectId}`);
             setProject(response.data);
+            setEditPath(response.data.repo_path || "");
         } catch (error) {
             console.error("Failed to fetch project", error);
-            // router.push('/projects'); // Redirect if not found?
         } finally {
             setLoading(false);
+        }
+    };
+
+    const handleUpdatePath = async () => {
+        try {
+            await api.patch(`/projects/${projectId}`, { repo_path: editPath });
+            setProject(prev => prev ? { ...prev, repo_path: editPath } : null);
+            setEditing(false);
+            alert("Project path updated!");
+        } catch (error) {
+            console.error("Failed to update path", error);
+            alert("Failed to update path");
         }
     };
 
@@ -146,6 +160,13 @@ export default function ProjectDetailPage() {
                 </div>
                 <div className="flex space-x-3">
                     <button
+                        onClick={() => router.push(`/chat?projectId=${projectId}`)}
+                        className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-500 transition-colors font-bold flex items-center gap-2"
+                    >
+                        <MessageSquare size={16} />
+                        <span>Open Chat</span>
+                    </button>
+                    <button
                         onClick={handleDelete}
                         className="px-4 py-2 bg-red-900/30 text-red-400 border border-red-900 rounded-lg hover:bg-red-900/50 transition-colors"
                     >
@@ -188,7 +209,32 @@ export default function ProjectDetailPage() {
 
                 {/* Stats / Info */}
                 <div className="bg-zinc-900 p-6 rounded-lg border border-zinc-800 col-span-2">
-                    <h3 className="text-lg font-semibold mb-4">Project Info</h3>
+                    <div className="flex justify-between items-center mb-4">
+                        <h3 className="text-lg font-semibold">Project Info</h3>
+                        {!editing ? (
+                            <button 
+                                onClick={() => setEditing(true)}
+                                className="text-xs px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded border border-zinc-700"
+                            >
+                                Edit Path
+                            </button>
+                        ) : (
+                            <div className="flex gap-2">
+                                <button 
+                                    onClick={handleUpdatePath}
+                                    className="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded"
+                                >
+                                    Save
+                                </button>
+                                <button 
+                                    onClick={() => { setEditing(false); setEditPath(project.repo_path || ""); }}
+                                    className="text-xs px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        )}
+                    </div>
                     <div className="grid grid-cols-2 gap-4">
                         <div>
                             <div className="text-sm text-zinc-500">Project ID</div>
@@ -198,14 +244,22 @@ export default function ProjectDetailPage() {
                             <div className="text-sm text-zinc-500">Created At</div>
                             <div>{new Date(project.created_at).toLocaleString()}</div>
                         </div>
-                        {project.repo_path && (
-                            <div className="col-span-2">
-                                <div className="text-sm text-zinc-500">Local Path</div>
-                                <div className="font-mono text-sm bg-zinc-950 p-2 rounded border border-zinc-800">
-                                    {project.repo_path}
+                        <div className="col-span-2">
+                            <div className="text-sm text-zinc-500 mb-1">Local Path (repo_path)</div>
+                            {editing ? (
+                                <input 
+                                    type="text"
+                                    value={editPath}
+                                    onChange={(e) => setEditPath(e.target.value)}
+                                    className="w-full bg-zinc-950 border border-indigo-500/50 rounded p-2 text-sm font-mono text-indigo-300 focus:outline-none focus:border-indigo-500"
+                                    placeholder="D:/project/my-project"
+                                />
+                            ) : (
+                                <div className="font-mono text-sm bg-zinc-950 p-2 rounded border border-zinc-800 text-zinc-300">
+                                    {project.repo_path || "No path configured"}
                                 </div>
-                            </div>
-                        )}
+                            )}
+                        </div>
                     </div>
                 </div>
             </div>

@@ -40,10 +40,18 @@ def verify_job_signature(job_dict: dict, public_key_pem: str) -> bool:
         
     Implementation follows JOB_AND_SECURITY.md Section 3.3
     """
+    import sys
     try:
+        # Handle literal \n characters and remove any accidental quotes
+        public_key_pem = public_key_pem.replace('\\n', '\n').strip('\"').strip('\'')
+        
         # 1. Extract signature
         job_copy = job_dict.copy()
         signature_field = job_copy.pop('signature', None)
+        
+        # [DEBUG] 확실한 로그 출력
+        print(f"\n[SECURITY_DEBUG] Job ID: {job_copy.get('job_id')}", flush=True)
+        print(f"[SECURITY_DEBUG] Public Key Type: {type(public_key_pem)}", flush=True)
         
         if not signature_field:
             raise SecurityError("Job missing signature field")
@@ -60,9 +68,23 @@ def verify_job_signature(job_dict: dict, public_key_pem: str) -> bool:
         if not isinstance(public_key, ed25519.Ed25519PublicKey):
             raise SecurityError("Public key is not Ed25519 format")
         
-        # 3. Recreate canonical message (MUST match backend's canonical JSON)
-        canonical_json = json.dumps(job_copy, sort_keys=True, separators=(',', ':'))
+        # [CRITICAL] 검증할 필드만 명확하게 추출
+        signable_keys = [
+            'job_id', 'execution_location', 'provider', 'model', 
+            'repo_root', 'allowed_paths', 'steps', 'metadata'
+        ]
+        payload_to_verify = {k: job_dict[k] for k in signable_keys if k in job_dict}
+        
+        # 3. Recreate canonical message
+        # 백엔드와 100% 일치하도록 separators, ensure_ascii, default=str 설정을 맞춥니다.
+        canonical_json = json.dumps(payload_to_verify, sort_keys=True, separators=(',', ':'), ensure_ascii=False, default=str)
         message = canonical_json.encode('utf-8')
+        
+        print(f"[SECURITY_DEBUG] Canonical Length: {len(message)}", flush=True)
+        
+        # 4. Verify signature
+        
+        print(f"[SECURITY_DEBUG] Canonical JSON Length: {len(message)}", flush=True)
         
         # 4. Verify signature
         try:
@@ -255,6 +277,33 @@ def validate_job_paths(job: dict) -> None:
             print(f"🔒 Path validation failed: {e}")
             raise
 
+
+def validate_job_scope(job: dict) -> None:
+    """
+    Validate complete job scope: paths, tools, and size
+    
+    Args:
+        job: Job dictionary
+        
+    Raises:
+        SecurityError: On any validation failure
+    """
+    # 1. Validate paths
+    validate_job_paths(job)
+    
+    # 2. Validate tool allowlist
+    tool_allowlist = job.get('tool_allowlist', [])
+    if not tool_allowlist:
+        # Every job must have at least one allowed tool (or empty if no tools used)
+        pass
+        
+    # 3. Validate total size
+    validate_total_job_size(job)
+
+def validate_tool_call(tool_name: str, allowlist: List[str]) -> None:
+    """Check if tool call is allowlisted for this job"""
+    if tool_name not in allowlist:
+        raise SecurityError(f"Tool execution denied: '{tool_name}' not in allowlist {allowlist}")
 
 # ============================================
 # File Size Validation

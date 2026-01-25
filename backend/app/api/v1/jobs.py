@@ -1,7 +1,16 @@
+# -*- coding: utf-8 -*-
 """
 Job management endpoints
-Handles job creation, status queries, and worker polling
 """
+import json
+import sys
+
+# [UTF-8] Force stdout/stderr to UTF-8
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from typing import Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, Request
@@ -183,44 +192,58 @@ async def get_pending_job(
     job_manager: JobManager = Depends(get_job_manager)
 ):
     """
-    Worker endpoint: Poll for pending jobs (long polling)
-    
-    This endpoint is called by Local Workers to fetch jobs from the queue.
-    Uses long polling with 30s timeout.
-    
-    Args:
-        worker_token: Validated worker token
-        job_manager: Job manager service
-        
-    Returns:
-        Job JSON (200) or None (204) if no jobs available
+    Worker endpoint: Poll for pending jobs (Reliable Queue)
     """
-    # In production, determine tenant_id from worker registration
-    # For now, use default tenant
+    # In production, determine tenant_id and worker_id from credentials
     tenant_id = "tenant_hyungnim"
+    worker_id = "worker_001" # Mock for now
     
     queue_key = f"job_queue:{tenant_id}"
+    processing_key = f"job_processing:{tenant_id}:{worker_id}"
     
-    # BLPOP with 30s timeout (long polling)
-    result = await job_manager.redis.blpop(queue_key, timeout=30)
+    # BRPOPLPUSH: Move job from queue to processing list atomically
+    # This prevents orphaned jobs if worker disconnects after fetch
+    job_json = await job_manager.redis.brpoplpush(queue_key, processing_key, timeout=30)
     
-    if result is None:
-        # No jobs available - return 204 No Content
-        logger.debug("No pending jobs available")
+    if job_json is None:
         return None
     
-    # result is tuple: (queue_key, job_json)
-    _, job_json = result
-    
     logger.info(
-        "Job fetched by worker",
-        worker_token=worker_token[:20] + "...",
+        "Job fetched by worker (Reliable Queue)",
+        worker_id=worker_id,
         tenant_id=tenant_id
     )
     
-    # Return job JSON
-    import json
     return json.loads(job_json)
+
+@router.post("/{job_id}/acknowledge")
+async def acknowledge_job(
+    job_id: UUID,
+    worker_token: str = Depends(verify_worker_credentials),
+    job_manager: JobManager = Depends(get_job_manager)
+):
+    """
+    Worker endpoint: Acknowledge job receipt and start execution
+    Removes job from processing list.
+    """
+    tenant_id = "tenant_hyungnim"
+    worker_id = "worker_001"
+    processing_key = f"job_processing:{tenant_id}:{worker_id}"
+    
+    # To remove from processing list, we need the exact value.
+    # Since we only have job_id, we scan the processing list.
+    # (In high-scale, we'd use a different structure like a Hash)
+    items = await job_manager.redis.lrange(processing_key, 0, -1)
+    for item in items:
+        job_data = json.loads(item)
+        if job_data.get("job_id") == str(job_id):
+            await job_manager.redis.lrem(processing_key, 1, item)
+            break
+            
+    # Mark job as RUNNING
+    await job_manager.update_job_status(str(job_id), JobStatus.RUNNING)
+    
+    return {"message": "Job acknowledged"}
 
 
 @router.post("/{job_id}/result")

@@ -1,7 +1,14 @@
+# -*- coding: utf-8 -*-
 """
 Main entry point for Local Worker
 """
 import sys
+# [UTF-8] Ensure process-level UTF-8 encoding for stdout/stderr
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from pathlib import Path
 
 # Add parent directory to Python path for imports

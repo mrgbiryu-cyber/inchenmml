@@ -2,16 +2,19 @@
 
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useProjectStore } from '@/store/projectStore';
+import { useAuthStore } from '@/store/useAuthStore';
 import api from '@/lib/axios-config';
-import { Folder, MessageSquare, Settings, Shield, Menu, X } from 'lucide-react';
+import { Folder, Settings, Shield, Menu, X, LogOut, Workflow, Cpu, Database } from 'lucide-react';
 import clsx from 'clsx';
 
 export default function Sidebar() {
     const pathname = usePathname();
     const router = useRouter();
+    const searchParams = useSearchParams();
     const { currentProjectId, setCurrentProjectId, projects, setProjects } = useProjectStore();
+    const logout = useAuthStore((state) => state.logout);
     const [loading, setLoading] = useState(false);
     const [isOpen, setIsOpen] = useState(false); // Mobile state
 
@@ -34,6 +37,8 @@ export default function Sidebar() {
     const isActive = (path: string) => {
         return pathname.startsWith(path) ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-white';
     };
+
+    const currentTab = searchParams.get('tab');
 
     return (
         <>
@@ -58,7 +63,7 @@ export default function Sidebar() {
                 isOpen ? "translate-x-0" : "-translate-x-full"
             )}>
                 <div className="p-6">
-                    <Link href="/projects" className="flex items-center gap-2 group" onClick={() => setIsOpen(false)}>
+                    <Link href="/chat" className="flex items-center gap-2 group" onClick={() => setIsOpen(false)}>
                         <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-600 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-900/20 group-hover:scale-105 transition-transform">
                             <span className="text-white font-bold text-xs">B</span>
                         </div>
@@ -77,43 +82,39 @@ export default function Sidebar() {
                             <Folder size={18} />
                             Projects
                         </Link>
-                        <Link
-                            href="/chat"
-                            onClick={() => setIsOpen(false)}
-                            className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all text-sm font-medium ${isActive('/chat')}`}
-                        >
-                            <MessageSquare size={18} />
-                            Global Chat
-                        </Link>
                     </nav>
 
-                    {/* Projects Section */}
+                    {/* System Links Section (Replacing Active Projects) */}
                     <div>
                         <div className="px-3 mb-2 flex items-center justify-between">
-                            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Active Projects</span>
+                            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Resources</span>
                         </div>
-                        <div className="space-y-0.5">
-                            {loading ? (
-                                <div className="px-3 py-2 text-xs text-zinc-600 animate-pulse italic">Loading projects...</div>
-                            ) : projects.length === 0 ? (
-                                <div className="px-3 py-2 text-xs text-zinc-600 italic">No projects found</div>
-                            ) : (
-                                projects.map((project) => (
-                                    <button
-                                        key={project.id}
-                                        onClick={() => {
-                                            setCurrentProjectId(project.id);
-                                            setIsOpen(false);
-                                            router.push(`/projects/${project.id}`);
-                                        }}
-                                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all text-sm font-medium text-left ${currentProjectId === project.id ? 'bg-indigo-600/10 text-indigo-400' : 'text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-300'}`}
-                                    >
-                                        <div className={`w-1.5 h-1.5 rounded-full ${currentProjectId === project.id ? 'bg-indigo-500' : 'bg-zinc-700'}`}></div>
-                                        <span className="truncate">{project.name}</span>
-                                    </button>
-                                ))
-                            )}
-                        </div>
+                        <nav className="space-y-1">
+                            <Link
+                                href={`/chat?tab=langgraph${currentProjectId ? `&projectId=${currentProjectId}` : ''}`}
+                                onClick={() => setIsOpen(false)}
+                                className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all text-sm font-medium ${currentTab === 'langgraph' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-white'}`}
+                            >
+                                <Workflow size={18} />
+                                LangGraph
+                            </Link>
+                            <Link
+                                href={`/chat?tab=graph${currentProjectId ? `&projectId=${currentProjectId}` : ''}`}
+                                onClick={() => setIsOpen(false)}
+                                className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all text-sm font-medium ${currentTab === 'graph' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-white'}`}
+                            >
+                                <Cpu size={18} />
+                                Knowledge Graph
+                            </Link>
+                            <Link
+                                href={`/chat?tab=vector${currentProjectId ? `&projectId=${currentProjectId}` : ''}`}
+                                onClick={() => setIsOpen(false)}
+                                className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all text-sm font-medium ${currentTab === 'vector' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-white'}`}
+                            >
+                                <Database size={18} />
+                                Vector DB
+                            </Link>
+                        </nav>
                     </div>
 
                     {/* System Section */}
@@ -134,7 +135,18 @@ export default function Sidebar() {
                     </div>
                 </div>
 
-                <div className="p-4 mt-auto border-t border-zinc-800/50">
+                <div className="p-4 mt-auto border-t border-zinc-800/50 space-y-2">
+                    <button 
+                        onClick={() => {
+                            logout();
+                            router.push('/login');
+                        }}
+                        className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-400/10 transition-all text-sm font-medium"
+                    >
+                        <LogOut size={18} />
+                        Logout
+                    </button>
+
                     <div className="flex items-center gap-3 p-2 rounded-xl bg-zinc-900/50 border border-zinc-800/50">
                         <div className="w-10 h-10 rounded-lg bg-gradient-to-tr from-zinc-800 to-zinc-700 flex items-center justify-center">
                             <span className="text-zinc-400 font-bold">U</span>

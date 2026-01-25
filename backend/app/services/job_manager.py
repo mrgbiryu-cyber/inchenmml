@@ -1,7 +1,16 @@
+# -*- coding: utf-8 -*-
 """
 Job Manager Service
-Handles job creation, signing, queueing, and lifecycle management
 """
+import json
+import sys
+
+# [UTF-8] Force stdout/stderr to UTF-8
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from typing import Optional, Dict, Any
 from uuid import uuid4
 import time
@@ -122,6 +131,7 @@ class JobManager:
             "idempotency_key": idempotency_key,
             "steps": job_request.steps,
             "priority": job_request.priority,
+            "tool_allowlist": job_request.tool_allowlist, # [TODO 9]
             "metadata": job_request.metadata.dict(),
             "file_operations": [op.dict() for op in job_request.file_operations],
             "retry_count": 0,
@@ -346,11 +356,6 @@ class JobManager:
     ) -> None:
         """
         Update job status (called by workers or internal processes)
-        
-        Args:
-            job_id: Job identifier
-            status: New status
-            result: Optional job result
         """
         # Update status
         await self.redis.set(f"job:{job_id}:status", status.value)
@@ -369,8 +374,45 @@ class JobManager:
                 int(time.time())
             )
         
+        # [Reliable Queue] If job is finished, we should ideally remove it from processing lists.
+        # This is handled by workers explicitly or via cleanup tools.
+
         logger.info(
             "Job status updated",
             job_id=job_id,
             status=status.value
         )
+
+    async def clear_queue(self, tenant_id: str) -> int:
+        """Clear all jobs from a tenant's queue"""
+        queue_key = f"job_queue:{tenant_id}"
+        processing_pattern = f"job_processing:{tenant_id}:*"
+        
+        # Delete main queue
+        count = await self.redis.delete(queue_key)
+        
+        # Delete all processing lists for this tenant
+        p_keys = await self.redis.keys(processing_pattern)
+        if p_keys:
+            await self.redis.delete(*p_keys)
+            count += len(p_keys)
+            
+        return count
+
+    async def fix_orphaned_jobs(self, tenant_id: str) -> List[str]:
+        """Find jobs marked as QUEUED but not in any queue, and mark them as FAILED"""
+        fixed_ids = []
+        # Find all job status keys
+        keys = await self.redis.keys(f"job:*:status")
+        for key in keys:
+            status = await self.redis.get(key)
+            if status == "QUEUED":
+                # Check if it belongs to this tenant
+                job_id = key.split(":")[1]
+                spec_json = await self.redis.get(f"job:{job_id}:spec")
+                if spec_json:
+                    spec = json.loads(spec_json)
+                    if spec.get("tenant_id") == tenant_id:
+                        await self.redis.set(key, "FAILED")
+                        fixed_ids.append(job_id)
+        return fixed_ids

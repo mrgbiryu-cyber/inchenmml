@@ -1,13 +1,112 @@
+# -*- coding: utf-8 -*-
 from typing import List, Optional
+import sys
+
+# [UTF-8] Force stdout/stderr to UTF-8
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from datetime import datetime
 import uuid
 
-from app.models.schemas import Project, ProjectAgentConfig, User, AgentDefinition, ProjectCreate
+from app.models.schemas import Project, ProjectAgentConfig, User, AgentDefinition, ProjectCreate, ChatMessageResponse
 from app.api.dependencies import get_current_user
 from app.core.neo4j_client import neo4j_client
+from app.core.database import get_messages_from_rdb
 
 router = APIRouter()
+
+async def _get_project_or_recover(project_id: str, current_user: User) -> dict:
+    """Helper to get project data from Neo4j, with auto-recovery for system-master"""
+    project_data = await neo4j_client.get_project(project_id)
+    
+    # [CRITICAL] system-master는 데이터가 있어도 설정이 비어있거나 경로가 없으면 강제 복구
+    is_broken_system = project_id == "system-master" and (
+        not project_data or 
+        not project_data.get("agent_config") or 
+        not project_data.get("repo_path")
+    )
+
+    if is_broken_system:
+        print(f"DEBUG: system-master is missing or broken. Force-recovering for user {current_user.id}")
+        now = datetime.utcnow()
+        from app.core.config import settings
+        
+        # 완벽한 기본 설정 세트
+        default_agents = ProjectAgentConfig(
+            workflow_type="SEQUENTIAL",
+            entry_agent_id="agent_planner_master",
+            agents=[
+                AgentDefinition(
+                    agent_id="agent_planner_master",
+                    role="PLANNER",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
+                    system_prompt="You are a Master Planner. Break down tasks into steps.",
+                    config={
+                        "repo_root": "D:/project/myllm",
+                        "allowed_paths": ["D:/project/myllm"],
+                        "tool_allowlist": ["read_file", "list_dir"],
+                        "risk_level": "safe"
+                    },
+                    next_agents=["agent_coder_master"]
+                ),
+                AgentDefinition(
+                    agent_id="agent_coder_master",
+                    role="CODER",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
+                    system_prompt="You are a Senior Coder. Write clean, efficient code.",
+                    config={
+                        "repo_root": "D:/project/myllm",
+                        "allowed_paths": ["D:/project/myllm"],
+                        "mode": "REPAIR",
+                        "change_policy": {"no_full_overwrite": True},
+                        "language_stack": ["python", "javascript", "typescript"]
+                    },
+                    next_agents=["agent_reviewer_master"]
+                ),
+                AgentDefinition(
+                    agent_id="agent_reviewer_master",
+                    role="REVIEWER",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
+                    system_prompt="You are a Code Reviewer. Check for bugs and style.",
+                    config={
+                        "repo_root": "D:/project/myllm",
+                        "allowed_paths": ["D:/project/myllm"],
+                        "tool_allowlist": ["read_file"]
+                    },
+                    next_agents=[]
+                )
+            ]
+        )
+
+        sys_project = Project(
+            id="system-master",
+            name="System Master",
+            description="System-wide master project for global orchestration",
+            project_type="SYSTEM",
+            repo_path="D:/project/myllm", # 경로 명시
+            tenant_id="tenant_hyungnim",
+            user_id="system",
+            created_at=now,
+            updated_at=now,
+            agent_config=default_agents
+        )
+        await neo4j_client.create_project_graph(sys_project)
+        project_data = await neo4j_client.get_project(project_id)
+        
+    if not project_data:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+        
+    # Check access (Tenant isolation)
+    if project_id != "system-master" and project_data["tenant_id"] != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this project")
+        
+    return project_data
 
 @router.post("/", response_model=Project, status_code=status.HTTP_201_CREATED)
 async def create_project(
@@ -34,6 +133,7 @@ async def create_project(
 
     # Inject Default Agents if none provided
     if not new_project.agent_config:
+        from app.core.config import settings
         # Use project_id prefix to make agent IDs unique to this project
         p_prefix = project_id[:8]
         new_project.agent_config = ProjectAgentConfig(
@@ -43,24 +143,24 @@ async def create_project(
                 AgentDefinition(
                     agent_id=f"agent_planner_{p_prefix}",
                     role="PLANNER",
-                    model="mimo-v2-flash",
-                    provider="OLLAMA",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
                     system_prompt="You are a Master Planner. Break down tasks into steps.",
                     next_agents=[f"agent_coder_{p_prefix}"]
                 ),
                 AgentDefinition(
                     agent_id=f"agent_coder_{p_prefix}",
                     role="CODER",
-                    model="mimo-v2-flash",
-                    provider="OLLAMA",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
                     system_prompt="You are a Senior Coder. Write clean, efficient code.",
                     next_agents=[f"agent_reviewer_{p_prefix}"]
                 ),
                 AgentDefinition(
                     agent_id=f"agent_reviewer_{p_prefix}",
                     role="REVIEWER",
-                    model="mimo-v2-flash",
-                    provider="OLLAMA",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
                     system_prompt="You are a Code Reviewer. Check for bugs and style.",
                     next_agents=[]
                 )
@@ -88,14 +188,7 @@ async def get_project(
     current_user: User = Depends(get_current_user)
 ):
     """Get project details"""
-    project_data = await neo4j_client.get_project(project_id)
-    if not project_data:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    # Check access (Tenant isolation)
-    if project_data["tenant_id"] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this project")
-        
+    project_data = await _get_project_or_recover(project_id, current_user)
     return Project(**project_data)
 
 @router.patch("/{project_id}", response_model=Project)
@@ -105,12 +198,7 @@ async def update_project(
     current_user: User = Depends(get_current_user)
 ):
     """Update project"""
-    project_data = await neo4j_client.get_project(project_id)
-    if not project_data:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    if project_id != "system-master" and project_data["tenant_id"] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    project_data = await _get_project_or_recover(project_id, current_user)
     
     # Update fields
     for key, value in project_update.items():
@@ -130,12 +218,7 @@ async def delete_project(
     current_user: User = Depends(get_current_user)
 ):
     """Delete project"""
-    project_data = await neo4j_client.get_project(project_id)
-    if not project_data:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    if project_id != "system-master" and project_data["tenant_id"] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    await _get_project_or_recover(project_id, current_user)
         
     await neo4j_client.delete_project(project_id)
     return None
@@ -147,12 +230,7 @@ async def save_agent_config(
     current_user: User = Depends(get_current_user)
 ):
     """Save agent configuration for a project"""
-    project_data = await neo4j_client.get_project(project_id)
-    if not project_data:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    if project_id != "system-master" and project_data["tenant_id"] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    project_data = await _get_project_or_recover(project_id, current_user)
         
     project_data["agent_config"] = config
     project_data["updated_at"] = datetime.utcnow()
@@ -170,15 +248,10 @@ async def get_agent_config(
     """Get agent configuration for a project"""
     print(f"DEBUG: GET Agent Config for Project: {project_id}")
     
-    project_data = await neo4j_client.get_project(project_id)
-    if not project_data:
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
-    
-    # Check access
-    if project_id != "system-master" and project_data["tenant_id"] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    project_data = await _get_project_or_recover(project_id, current_user)
         
     if not project_data.get("agent_config"):
+        from app.core.config import settings
         # Return default config to allow editor to start with something
         return ProjectAgentConfig(
             workflow_type="SEQUENTIAL",
@@ -187,16 +260,16 @@ async def get_agent_config(
                 AgentDefinition(
                     agent_id="agent_planner",
                     role="PLANNER",
-                    model="mimo-v2-flash",
-                    provider="OLLAMA",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
                     system_prompt="You are a Master Planner.",
                     next_agents=["agent_coder"]
                 ),
                 AgentDefinition(
                     agent_id="agent_coder",
                     role="CODER",
-                    model="mimo-v2-flash",
-                    provider="OLLAMA",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
                     system_prompt="You are a Senior Coder.",
                     next_agents=[]
                 )
@@ -217,16 +290,7 @@ async def execute_project(
     """
     print(f"DEBUG: Starting execution for Project: {project_id}")
     try:
-        project_data = await neo4j_client.get_project(project_id)
-        if not project_data:
-            print(f"DEBUG: Project {project_id} not found in Neo4j")
-            raise HTTPException(status_code=404, detail="Project not found")
-        
-        # Check access (Tenant isolation)
-        if project_id != "system-master" and project_data["tenant_id"] != current_user.tenant_id:
-            print(f"DEBUG: Unauthorized access attempt to project {project_id} by user {current_user.id}")
-            raise HTTPException(status_code=403, detail="Not authorized to access this project")
-            
+        project_data = await _get_project_or_recover(project_id, current_user)
         project = Project(**project_data)
         
         # [Defensive] Inject repo_path for system-master if missing
@@ -265,9 +329,7 @@ async def test_agents(
     current_user: User = Depends(get_current_user)
 ):
     """Test a group of agents in a project"""
-    project_data = await neo4j_client.get_project(project_id)
-    if not project_data:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project_data = await _get_project_or_recover(project_id, current_user)
     
     if not project_data.get("agent_config"):
         raise HTTPException(status_code=400, detail="Project has no agent configuration")
@@ -292,20 +354,65 @@ async def test_agents(
     
     return results
 
-@router.get("/{project_id}/chat-history", response_model=List[dict])
+@router.get("/{project_id}/chat-history", response_model=List[ChatMessageResponse])
 async def get_chat_history(
     project_id: str,
     limit: int = 50,
     thread_id: Optional[str] = None,
     current_user: User = Depends(get_current_user)
 ):
-    """Get chat history for a project"""
-    project_data = await neo4j_client.get_project(project_id)
-    if not project_data:
-        raise HTTPException(status_code=404, detail="Project not found")
+    """Get chat history for a project (Global Timeline for the project)"""
+    await _get_project_or_recover(project_id, current_user)
     
-    if project_id != "system-master" and project_data["tenant_id"] != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    from sqlalchemy import select, or_
+    from app.core.database import AsyncSessionLocal, MessageModel, _normalize_project_id
+    
+    async with AsyncSessionLocal() as session:
+        # [CRITICAL] system-master인 경우 project_id가 NULL인 데이터도 함께 가져와야 함
+        p_id = _normalize_project_id(project_id)
+        if project_id == "system-master":
+            stmt = select(MessageModel).where(
+                or_(MessageModel.project_id == None, MessageModel.project_id == "system-master")
+            )
+        else:
+            stmt = select(MessageModel).where(MessageModel.project_id == p_id)
+            
+        stmt = stmt.order_by(MessageModel.timestamp.desc()).limit(limit)
         
-    messages = await neo4j_client.get_chat_history(project_id, limit, thread_id=thread_id)
-    return messages
+        result = await session.execute(stmt)
+        messages = result.scalars().all()
+        # 사용자가 보기 편하게 다시 과거->현재 순으로 뒤집음
+        messages = sorted(messages, key=lambda x: x.timestamp)
+    
+    # Filter roles and empty content for chat history
+    chat_list = []
+    for m in messages:
+        if not m.content or not m.content.strip():
+            continue
+            
+        role = m.sender_role
+        if role in ["assistant_partial", "master", "agent", "tool", "auditor"]:
+            role = "assistant"
+        elif role not in ["user", "assistant", "system"]:
+            role = "assistant"
+        
+        chat_list.append(ChatMessageResponse(
+            id=str(m.message_id),
+            role=role,
+            content=m.content,
+            created_at=m.timestamp.isoformat() if m.timestamp else datetime.utcnow().isoformat(),
+            thread_id=m.thread_id,
+            project_id=str(m.project_id) if m.project_id else project_id
+        ))
+    return chat_list
+
+@router.get("/{project_id}/knowledge-graph")
+async def get_knowledge_graph(
+    project_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Get the knowledge graph for a project"""
+    await _get_project_or_recover(project_id, current_user)
+        
+    graph = await neo4j_client.get_knowledge_graph(project_id)
+    return graph

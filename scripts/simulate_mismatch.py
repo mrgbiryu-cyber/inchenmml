@@ -23,7 +23,7 @@ private_key_pem = env_config.get("JOB_SIGNING_PRIVATE_KEY").replace('\\n', '\n')
 if private_key_pem.startswith('"'): private_key_pem = private_key_pem[1:-1]
 
 agents_yaml_path = project_root / 'local_agent_hub' / 'agents.yaml'
-with open(agents_yaml_path) as f:
+with open(agents_yaml_path, encoding='utf-8') as f:
     config = yaml.safe_load(f)
     public_key_pem = config['security']['job_signing_public_key']
 

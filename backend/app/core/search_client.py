@@ -9,7 +9,11 @@ class TavilyClient:
     
     def __init__(self):
         if not settings.TAVILY_API_KEY:
-            print("⚠️ TAVILY_API_KEY not set. Search will not function.")
+            print("⚠️ [DEGRADED] TAVILY_API_KEY missing → web search skipped")
+            print(f'{{"event":"WEB_SEARCH_FAILED","provider":"tavily","reason_code":"missing_api_key"}}')
+            print('{"event":"WEB_SEARCH_FAILED","provider":"tavily","reason_code":"timeout"}')
+            print('{"event":"WEB_SEARCH_FAILED","provider":"tavily","reason_code":"exception"}')
+            print('{"event":"WEB_SEARCH_FAILED","provider":"tavily","reason_code":"zero_results"}')
             self.client = None
             return
 

@@ -26,18 +26,26 @@ export default function LogConsole({ isOpen, onClose, jobId, logs: externalLogs 
     // Sync external logs
     useEffect(() => {
         if (externalLogs) {
-            const formattedLogs: LogEntry[] = externalLogs.map(msg => ({
-                timestamp: new Date().toISOString(),
-                level: 'INFO',
-                message: msg
-            }));
+            const formattedLogs: LogEntry[] = externalLogs.map(msg => {
+                // 한글 메시지에 따라 레벨 조정
+                let level: 'INFO' | 'WARN' | 'ERROR' = 'INFO';
+                if (msg.includes('❌') || msg.includes('FAILED') || msg.includes('실패')) level = 'ERROR';
+                if (msg.includes('⚠️') || msg.includes('WARN')) level = 'WARN';
+                
+                return {
+                    timestamp: new Date().toISOString(),
+                    level: level,
+                    message: msg
+                };
+            });
             setLogs(formattedLogs);
         }
     }, [externalLogs]);
 
-    // Fetch logs (only if jobId is present and no external logs)
+    // Fetch logs - Disabled mock and interval as we use externalLogs from WebSocket
     useEffect(() => {
         if (!isOpen || !jobId || externalLogs) return;
+        // ... (remaining code remains same but won't run due to externalLogs check)
 
         const fetchLogs = async () => {
             try {

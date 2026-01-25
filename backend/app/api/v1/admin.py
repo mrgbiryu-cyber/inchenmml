@@ -1,5 +1,13 @@
 from typing import List, Optional
+# -*- coding: utf-8 -*-
 from fastapi import APIRouter, Depends, HTTPException, status
+import sys
+
+# [UTF-8] Force stdout/stderr to UTF-8
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 from app.core.security import get_password_hash
 from app.models.schemas import User, UserInDB, UserRole, UserQuota, Domain
 from app.api.dependencies import get_current_user

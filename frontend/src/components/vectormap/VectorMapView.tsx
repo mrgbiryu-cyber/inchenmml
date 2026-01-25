@@ -39,19 +39,43 @@ export default function VectorMapView() {
             }
         }
 
-        // Generate Mock Vector Data
-        const N = 80;
+        // Meaningful labels for Vector Data
+        const concepts = [
+            "Transformer", "Attention Mechanism", "Encoder-Decoder", "LLM Fine-tuning",
+            "Vector Embeddings", "Cosine Similarity", "RAG Pipeline", "Knowledge Graph",
+            "Agentic Workflow", "Planning Agent", "Memory Management", "Prompt Engineering",
+            "Zero-shot Learning", "Few-shot Prompting", "Reinforcement Learning", "RLHF",
+            "Docker Execution", "Local Worker Hub", "Neo4j Storage", "FastAPI Backend",
+            "Next.js Frontend", "Ed25519 Signing", "Path Validation", "Job Queue",
+            "LangGraph Context", "Tool Interceptor", "System Master", "Streaming API",
+            "JWT Auth", "RBAC Policy", "Redis Cache", "Model Quantization",
+            "Ollama Runtime", "OpenRouter Proxy", "Context Window", "Tokenization",
+            "Semantic Search", "Metadata Filtering", "Database Indexing", "Async Tasks",
+            "Error Handling", "Log Monitoring", "User Feedback Loop", "System Butler",
+            "Planning Mode", "Execution Gate", "Dynamic Toolsets", "Agent Registry",
+            "Schema Validation", "JSON Parsing", "State Persistence", "Mobile Responsive",
+            "Tailwind Styling", "Lucide Icons", "Three.js Canvas", "Force-directed Graph",
+            "Node Connectivity", "Edge Relationship", "Cluster Analysis", "Dimensionality Reduction",
+            "PCA Projection", "t-SNE Mapping", "Embedding Space", "High-dimensional Vectors",
+            "Similarity Search", "HNSW Index", "FAISS Library", "Pinecone Cloud",
+            "Local Chroma DB", "Document Chunking", "Overlap Strategy", "Recursive Splitting",
+            "PDF Extraction", "Markdown Parsing", "OCR Processing", "Speech Recognition",
+            "Vision Models", "Multimodal AI", "Cross-lingual Learning", "Bias Mitigation"
+        ];
+
+        const N = concepts.length;
         const gData = {
-            nodes: [...Array(N).keys()].map(i => ({
+            nodes: concepts.map((name, i) => ({
                 id: i,
-                group: Math.floor(Math.random() * 5),
-                val: Math.random() * 10
+                name: name,
+                group: Math.floor(Math.random() * 8),
+                val: 5 + Math.random() * 15
             })),
             links: [...Array(N).keys()]
-                .filter(id => id)
+                .filter(id => id > 0)
                 .map(id => ({
                     source: id,
-                    target: Math.round(Math.random() * (id - 1))
+                    target: Math.floor(Math.pow(Math.random(), 2) * id) // Connect to previous nodes biased towards older ones
                 }))
         };
         setData(gData as any);
@@ -91,14 +115,14 @@ export default function VectorMapView() {
             {use2D ? (
                 <ForceGraph2D
                     graphData={data}
-                    nodeLabel="id"
+                    nodeLabel="name"
                     nodeAutoColorBy="group"
                     backgroundColor="#09090b"
                 />
             ) : (
                 <ForceGraph3D
                     graphData={data}
-                    nodeLabel="id"
+                    nodeLabel="name"
                     nodeAutoColorBy="group"
                     backgroundColor="#09090b"
                     linkOpacity={0.5}

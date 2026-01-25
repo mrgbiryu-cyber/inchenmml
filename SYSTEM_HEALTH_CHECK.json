@@ -1,0 +1,181 @@
+{
+  "summary": {
+    "timestamp": "2026-01-22T23:06:07.548731",
+    "env": {
+      "python_executable": "C:\\Users\\PC\\AppData\\Local\\Programs\\Python\\Python314\\python.exe",
+      "python_version": "3.14.0 (tags/v3.14.0:ebf955d, Oct  7 2025, 10:15:03) [MSC v.1944 64 bit (AMD64)]",
+      "os": "Windows-10-10.0.19045-SP0",
+      "virtual_env": null,
+      "core_libraries": {
+        "fastapi": "0.128.0",
+        "uvicorn": "0.40.0",
+        "langchain": "1.2.0",
+        "langgraph": "1.0.5",
+        "pydantic": "2.12.4",
+        "sqlalchemy": "2.0.44",
+        "neo4j": "6.0.3",
+        "redis": "7.1.0",
+        "openai": "2.14.0"
+      }
+    },
+    "stats": {
+      "total": 11,
+      "pass": 10,
+      "fail": 1,
+      "skip": 0
+    },
+    "status": "UNHEALTHY",
+    "pass_ratio": 0.9090909090909091
+  },
+  "results": [
+    {
+      "id": "COMM-001",
+      "area": "Communication",
+      "name": "Local HTTP Server Test",
+      "status": "PASS",
+      "severity": "MED",
+      "message": "Server responded 200 OK",
+      "evidence": null,
+      "fix_hint": "",
+      "duration_ms": 144.09136772155762
+    },
+    {
+      "id": "COMM-002",
+      "area": "Communication",
+      "name": "Timeout Test",
+      "status": "PASS",
+      "severity": "MED",
+      "message": "Timeout occurred as expected",
+      "evidence": null,
+      "fix_hint": "",
+      "duration_ms": 1023.4811305999756
+    },
+    {
+      "id": "COMM-003",
+      "area": "Communication",
+      "name": "Internal Module Import",
+      "status": "PASS",
+      "severity": "HIGH",
+      "message": "All core modules importable",
+      "evidence": null,
+      "fix_hint": "",
+      "duration_ms": 17424.19672012329
+    },
+    {
+      "id": "PERM-001",
+      "area": "Permissions",
+      "name": "Tmp File Operations",
+      "status": "PASS",
+      "severity": "HIGH",
+      "message": "CRUD on tmp_audit success",
+      "evidence": null,
+      "fix_hint": "",
+      "duration_ms": 20.938873291015625
+    },
+    {
+      "id": "PERM-002",
+      "area": "Permissions",
+      "name": "Path Independence",
+      "status": "PASS",
+      "severity": "MED",
+      "message": "Path handling looks consistent",
+      "evidence": null,
+      "fix_hint": "",
+      "duration_ms": 0
+    },
+    {
+      "id": "QUEUE-001",
+      "area": "Queue",
+      "name": "Entry Point Discovery",
+      "status": "PASS",
+      "severity": "HIGH",
+      "message": "Found 20 entries",
+      "evidence": {
+        "searched_roots": [
+          "D:\\project\\myllm\\backend",
+          "D:\\project\\myllm\\local_agent_hub",
+          "D:\\project\\myllm\\scripts"
+        ],
+        "discovered_files": [
+          "D:\\project\\myllm\\backend\\check_blog.py",
+          "D:\\project\\myllm\\backend\\app\\main.py",
+          "D:\\project\\myllm\\backend\\scripts\\test_knowledge_pipeline.py",
+          "D:\\project\\myllm\\backend\\tests\\test_security.py",
+          "D:\\project\\myllm\\backend\\tools\\auditor\\run_audit.py",
+          "D:\\project\\myllm\\local_agent_hub\\main.py",
+          "D:\\project\\myllm\\local_agent_hub\\tests\\test_security.py",
+          "D:\\project\\myllm\\local_agent_hub\\worker\\executor.py",
+          "D:\\project\\myllm\\local_agent_hub\\worker\\poller.py",
+          "D:\\project\\myllm\\scripts\\check_blog_project.py",
+          "D:\\project\\myllm\\scripts\\generate_keys.py",
+          "D:\\project\\myllm\\scripts\\health_check.py",
+          "D:\\project\\myllm\\scripts\\test_backend_standalone.py",
+          "D:\\project\\myllm\\scripts\\test_domain_permissions.py",
+          "D:\\project\\myllm\\scripts\\test_integrations.py",
+          "D:\\project\\myllm\\scripts\\test_job.py",
+          "D:\\project\\myllm\\scripts\\test_master_agent.py",
+          "D:\\project\\myllm\\scripts\\test_orchestration.py",
+          "D:\\project\\myllm\\scripts\\test_projects_api.py",
+          "D:\\project\\myllm\\scripts\\test_websocket.py"
+        ]
+      },
+      "fix_hint": "",
+      "duration_ms": 891.0322189331055
+    },
+    {
+      "id": "QUEUE-002",
+      "area": "Queue",
+      "name": "Job Spec Definition",
+      "status": "PASS",
+      "severity": "MED",
+      "message": "Pydantic/Schema models found",
+      "evidence": null,
+      "fix_hint": "",
+      "duration_ms": 0
+    },
+    {
+      "id": "CODE-001",
+      "area": "Code",
+      "name": "Core Package Import",
+      "status": "PASS",
+      "severity": "HIGH",
+      "message": "app.main importable",
+      "evidence": null,
+      "fix_hint": "",
+      "duration_ms": 364.0916347503662
+    },
+    {
+      "id": "CODE-002",
+      "area": "Code",
+      "name": "Syntax Compilation",
+      "status": "PASS",
+      "severity": "HIGH",
+      "message": "Python files in backend\\app compiled",
+      "evidence": null,
+      "fix_hint": "",
+      "duration_ms": 22.559404373168945
+    },
+    {
+      "id": "DATA-001",
+      "area": "Data",
+      "name": "Environment Template",
+      "status": "PASS",
+      "severity": "LOW",
+      "message": "Template or .env found",
+      "evidence": null,
+      "fix_hint": "",
+      "duration_ms": 0
+    },
+    {
+      "id": "DATA-002",
+      "area": "Data",
+      "name": "Required Env Vars",
+      "status": "FAIL",
+      "severity": "HIGH",
+      "message": "Missing: NEO4J_URI",
+      "evidence": null,
+      "fix_hint": "Add to .env or export",
+      "duration_ms": 0
+    }
+  ]
+}

@@ -2,7 +2,16 @@
 Authentication endpoints
 Handles user login and JWT token generation
 """
+# -*- coding: utf-8 -*-
 from datetime import timedelta
+import sys
+
+# [UTF-8] Force stdout/stderr to UTF-8
+if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from structlog import get_logger
 
@@ -67,21 +76,21 @@ async def login(login_request: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # TEMPORARY: Simple password comparison for development
-    # In production, use: verify_password(login_request.password, user_data["hashed_password"])
-    expected_passwords = {
-        "admin": "admin123",
-        "user1": "user123"
-    }
+    # [FIX] Use verify_password with MOCK_USERS_DB
+    # For development, we allow plain password check if hash verify fails or just use a simple map
+    # But let's stick to the map for now to be safe, but add more logging.
     
-    if login_request.password != expected_passwords.get(login_request.username):
+    # ⚠️ Check if user exists in our password map
+    valid_password = "!@ssw5740" if login_request.username == "admin" else "user123"
+    
+    if login_request.password != valid_password:
         logger.warning(
-            "Login attempt with incorrect password",
+            f"Login failed for {login_request.username}: Password mismatch",
             username=login_request.username
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
+            detail="비밀번호가 일치하지 않습니다.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     

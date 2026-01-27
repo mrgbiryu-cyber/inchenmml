@@ -362,7 +362,14 @@ async def get_chat_history(
     current_user: User = Depends(get_current_user)
 ):
     """Get chat history for a project (Global Timeline for the project)"""
-    await _get_project_or_recover(project_id, current_user)
+    # [Resilience] Neo4j에 프로젝트 노드가 없더라도 RDB에 히스토리가 있으면 보여줌 (404 방지)
+    try:
+        await _get_project_or_recover(project_id, current_user)
+    except HTTPException as e:
+        if e.status_code == 404:
+            print(f"DEBUG: Project {project_id} not found in Neo4j, but attempting to fetch RDB history.")
+        else:
+            raise e
     
     from sqlalchemy import select, or_
     from app.core.database import AsyncSessionLocal, MessageModel, _normalize_project_id

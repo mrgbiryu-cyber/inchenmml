@@ -173,6 +173,10 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
             setHasMore(response.data.length === currentLimit);
         } catch (error: any) {
             console.error("Failed to fetch chat history", error);
+            if (error.response?.status === 404) {
+                console.warn("Project not found in backend. Resetting context.");
+                setCurrentProjectId(null);
+            }
         }
     };
 

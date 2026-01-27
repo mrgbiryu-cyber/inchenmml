@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional
 import time
 import httpx
 import json
+import os
 from structlog import get_logger
 
 from local_agent_hub.core.config import WorkerConfig
@@ -73,10 +74,101 @@ class JobExecutor:
         task_path.write_text(task_content, encoding='utf-8')
         return task_path
 
+    async def validate_preconditions(self, job: Dict[str, Any], repo_path: Path, role: str) -> Dict[str, Any]:
+        """
+        [NEW] 역할별 사전 조건 검증
+        - 에이전트가 진행 불가능한 상황을 사전에 감지
+        - 기존 동작에 영향을 주지 않고, 추가적인 방어 체계 제공
+        """
+        metadata = job.get('metadata', {})
+        
+        # API 테스트 에이전트: API 엔드포인트 확인
+        if "API" in role or "AUTH" in role:
+            # API 관련 파일 존재 확인
+            api_patterns = ["**/api/**/*.py", "**/routes/**/*.py", "**/endpoints/**/*.py"]
+            api_files = []
+            for pattern in api_patterns:
+                api_files.extend(list(repo_path.glob(pattern)))
+            
+            if not api_files:
+                logger.warning(f"⚠️ API 에이전트가 실행되었지만 API 파일이 없습니다: {repo_path}")
+                return {
+                    "can_proceed": False,
+                    "reason": f"프로젝트 경로 '{repo_path}'에 API 엔드포인트 파일이 없습니다.",
+                    "recommendation": "API 인증 에이전트를 제거하거나, API 엔드포인트를 먼저 개발하세요.",
+                    "severity": "ERROR"
+                }
+        
+        # REVIEWER/QA: 검토할 파일 존재 확인
+        if "REVIEWER" in role or "QA" in role:
+            # 검토 대상 코드 파일 확인
+            code_patterns = ["*.py", "*.js", "*.ts", "*.tsx", "*.jsx"]
+            code_files = []
+            for pattern in code_patterns:
+                code_files.extend(list(repo_path.glob(pattern)))
+            
+            if not code_files:
+                logger.warning(f"⚠️ 검수 에이전트가 실행되었지만 검토할 파일이 없습니다: {repo_path}")
+                return {
+                    "can_proceed": False,
+                    "reason": f"프로젝트 경로 '{repo_path}'에 검토할 코드 파일이 없습니다.",
+                    "recommendation": "CODER/DEVELOPER 에이전트를 먼저 실행하여 파일을 생성하세요.",
+                    "severity": "WARNING"
+                }
+        
+        # CODER/DEVELOPER: 쓰기 권한 확인
+        if "CODER" in role or "DEVELOPER" in role:
+            # 디렉토리 존재 및 쓰기 권한 확인
+            if not repo_path.exists():
+                logger.warning(f"⚠️ 개발 에이전트가 실행되었지만 경로가 없습니다: {repo_path}")
+                return {
+                    "can_proceed": False,
+                    "reason": f"프로젝트 경로 '{repo_path}'가 존재하지 않습니다.",
+                    "recommendation": "경로를 생성하거나 repo_root 설정을 확인하세요.",
+                    "severity": "ERROR"
+                }
+            
+            if not os.access(repo_path, os.W_OK):
+                logger.warning(f"⚠️ 개발 에이전트가 실행되었지만 쓰기 권한이 없습니다: {repo_path}")
+                return {
+                    "can_proceed": False,
+                    "reason": f"프로젝트 경로 '{repo_path}'에 쓰기 권한이 없습니다.",
+                    "recommendation": "경로 권한을 확인하거나 repo_root를 변경하세요.",
+                    "severity": "ERROR"
+                }
+        
+        # GIT 에이전트: .git 디렉토리 확인
+        if "GIT" in role or "DEPLOY" in role:
+            git_dir = repo_path / ".git"
+            if not git_dir.exists():
+                logger.warning(f"⚠️ GIT 에이전트가 실행되었지만 .git 디렉토리가 없습니다: {repo_path}")
+                return {
+                    "can_proceed": False,
+                    "reason": f"프로젝트 경로 '{repo_path}'가 Git 저장소가 아닙니다.",
+                    "recommendation": "Git을 초기화하거나 GIT 에이전트를 제거하세요.",
+                    "severity": "ERROR"
+                }
+        
+        # 모든 검증 통과
+        logger.info(f"✅ 사전 검증 통과: {role} 에이전트 실행 가능")
+        return {"can_proceed": True}
+
     async def run_ai_agent(self, job: Dict[str, Any], repo_path: Path) -> Dict[str, Any]:
         """실제 OpenRouter API를 호출하여 작업을 수행하거나 정교한 시뮬레이션을 수행합니다."""
         metadata = job.get('metadata', {})
         role = str(metadata.get('role', '')).upper()
+        
+        # [NEW] 사전 검증 단계 - 에이전트가 진행 불가능한 상황을 사전에 감지
+        validation = await self.validate_preconditions(job, repo_path, role)
+        if not validation.get("can_proceed", True):
+            logger.error(f"❌ 사전 검증 실패: {validation.get('reason')}")
+            return {
+                "status": "FAILED",
+                "reason": validation.get("reason"),
+                "recommendation": validation.get("recommendation"),
+                "severity": validation.get("severity", "ERROR"),
+                "can_proceed": False
+            }
         
         # [Fix] 너무 빨리 끝나서 루프 도는 것을 방지하고 실제 작업하는 척이라도 하도록 함
         await asyncio.sleep(2) 

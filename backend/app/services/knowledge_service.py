@@ -337,6 +337,40 @@ EXTRACTION GOALS: Identify Decisions, Requirements, Concepts, Tasks, History, Fa
             session.add(log)
             await session.commit()
 
+    def _get_embeddable_text(self, node: Dict) -> str:
+        """
+        노드를 임베딩 가능한 텍스트로 변환
+        
+        Args:
+            node: 지식 노드 딕셔너리
+        
+        Returns:
+            임베딩할 텍스트
+        """
+        parts = []
+        
+        # 타입
+        n_type = node.get("type", "")
+        if n_type:
+            parts.append(f"Type: {n_type}")
+        
+        # 제목/이름
+        if "title" in node:
+            parts.append(f"Title: {node['title']}")
+        elif "name" in node:
+            parts.append(f"Name: {node['name']}")
+        
+        # 설명/내용
+        props = node.get("properties", {})
+        if "description" in props:
+            parts.append(f"Description: {props['description']}")
+        if "content" in props:
+            parts.append(f"Content: {props['content']}")
+        if "summary" in props:
+            parts.append(f"Summary: {props['summary']}")
+        
+        return "\n".join(parts) if parts else ""
+
     async def _upsert_to_neo4j(self, msg: MessageModel, extracted: Any):
         if not isinstance(extracted, dict):
             return
@@ -407,6 +441,69 @@ EXTRACTION GOALS: Identify Decisions, Requirements, Concepts, Tasks, History, Fa
                 WHERE n <> p
                 MERGE (p)-[:HAS_KNOWLEDGE]->(n)
             """, {"project_id": project_id, "source_message_id": source_message_id})
+        
+        # 4. [신규] Vector DB에 임베딩 저장
+        from app.services.embedding_service import embedding_service
+        from app.core.vector_store import PineconeClient
+        
+        vector_client = PineconeClient()
+        
+        for node in extracted.get("nodes", []):
+            n_id = node.get("id", "")
+            n_type = node.get("type", "Concept")
+            
+            # 임베딩 대상 텍스트 생성
+            embed_text = self._get_embeddable_text(node)
+            
+            if not embed_text:
+                logger.warning("No embeddable text for node", node_id=n_id, node_type=n_type)
+                continue
+            
+            try:
+                # 임베딩 생성
+                embedding = await embedding_service.generate_embedding(embed_text)
+                
+                # Vector DB 저장
+                await vector_client.upsert_vectors(
+                    tenant_id=project_id,
+                    vectors=[{
+                        "id": n_id,
+                        "values": embedding,
+                        "metadata": {
+                            "type": n_type,
+                            "project_id": project_id,
+                            "title": node.get("title") or node.get("name", ""),
+                            "source": "knowledge",
+                            "source_message_id": source_message_id,
+                            "is_cognitive": n_type in ['Concept', 'Decision', 'Requirement', 'Logic', 'Task'],
+                            "created_at": datetime.utcnow().isoformat()
+                        }
+                    }],
+                    namespace="knowledge"
+                )
+                
+                # Neo4j에 embedding_id 저장
+                async with neo4j_client.driver.session() as session:
+                    await session.run("""
+                        MATCH (n {id: $n_id})
+                        SET n.embedding_id = $n_id,
+                            n.has_embedding = true
+                    """, {"n_id": n_id})
+                
+                logger.debug(
+                    "Embedding saved to Vector DB",
+                    node_id=n_id,
+                    node_type=n_type,
+                    vector_dim=len(embedding)
+                )
+                
+            except Exception as e:
+                logger.error(
+                    "Failed to save embedding to Vector DB",
+                    node_id=n_id,
+                    node_type=n_type,
+                    error=str(e)
+                )
 
     async def process_batch_pipeline(self, project_id: str, message_ids: List[uuid.UUID]):
         """
@@ -555,6 +652,82 @@ CONTEXT:
                     MERGE (a)-[r:{rel_type}]->(b)
                     SET r.project_id = $p_id
                 """, {"from_id": from_id, "to_id": to_id, "p_id": p_id})
+        
+        # [신규] 배치 노드 임베딩 생성 및 Vector DB 저장
+        from app.services.embedding_service import embedding_service
+        from app.core.vector_store import PineconeClient
+        
+        vector_client = PineconeClient()
+        nodes = extracted.get("nodes", [])
+        
+        if nodes:
+            # 배치로 임베딩 생성 (효율적)
+            embed_texts = []
+            node_ids = []
+            
+            for node in nodes:
+                # f-string 중첩 방지: 문자열 먼저 생성
+                n_type = node.get("type", "Concept")
+                n_title = node.get("title") or node.get("name", "")
+                hash_input = f"{p_id}:{n_type}:{n_title}".encode()
+                n_id = f"kg-{hashlib.sha256(hash_input).hexdigest()[:16]}"
+                
+                embed_text = self._get_embeddable_text(node)
+                
+                if embed_text:
+                    embed_texts.append(embed_text)
+                    node_ids.append((n_id, node))
+            
+            if embed_texts:
+                try:
+                    # 배치 임베딩 생성
+                    embeddings = await embedding_service.generate_batch_embeddings(embed_texts)
+                    
+                    # Vector DB에 배치 저장
+                    vectors = []
+                    for i, (n_id, node) in enumerate(node_ids):
+                        if i < len(embeddings) and embeddings[i]:
+                            vectors.append({
+                                "id": n_id,
+                                "values": embeddings[i],
+                                "metadata": {
+                                    "type": node.get("type", "Concept"),
+                                    "project_id": p_id,
+                                    "title": node.get("title") or node.get("name", ""),
+                                    "source": "knowledge",
+                                    "is_cognitive": node.get("type") in ['Concept', 'Decision', 'Requirement', 'Logic', 'Task'],
+                                    "created_at": datetime.utcnow().isoformat()
+                                }
+                            })
+                    
+                    if vectors:
+                        await vector_client.upsert_vectors(
+                            tenant_id=p_id,
+                            vectors=vectors,
+                            namespace="knowledge"
+                        )
+                        
+                        # Neo4j에 embedding_id 업데이트
+                        async with neo4j_client.driver.session() as session:
+                            for n_id, _ in node_ids:
+                                await session.run("""
+                                    MATCH (n {id: $n_id})
+                                    SET n.embedding_id = $n_id,
+                                        n.has_embedding = true
+                                """, {"n_id": n_id})
+                        
+                        logger.info(
+                            "Batch embeddings saved to Vector DB",
+                            project_id=p_id,
+                            count=len(vectors)
+                        )
+                
+                except Exception as e:
+                    logger.error(
+                        "Failed to save batch embeddings to Vector DB",
+                        project_id=p_id,
+                        error=str(e)
+                    )
 
 knowledge_service = KnowledgeService()
 

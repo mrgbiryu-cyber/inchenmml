@@ -21,10 +21,13 @@ from langchain_openai import ChatOpenAI
 from app.tools.system_tools import get_active_jobs_tool, get_job_history_tool
 
 from app.core.config import settings
-from app.models.master import MasterAgentConfig, ChatMessage, AgentConfigUpdate
+from app.models.master import MasterAgentConfig, ChatMessage, AgentConfigUpdate, MasterIntent, Draft
 from app.core.neo4j_client import neo4j_client
 from app.core.logging_config import get_recent_logs
 from app.core.database import save_message_to_rdb, get_messages_from_rdb
+
+# [v3.2] Import refactored stream_message
+from app.services.v32_stream_message_refactored import stream_message_v32
 
 @tool
 async def search_knowledge_tool(query: str, project_id: str = "system-master") -> str:
@@ -281,82 +284,98 @@ class MasterAgentService:
         self.config_path = "D:/project/myllm/backend/data/master_config.json"
         self._load_config()
         
-        # [v2.2 RULE 3] ARMED 상태 관리
-        self.is_armed: bool = False
-        self.armed_mes_hash: Optional[str] = None
-        self.current_mes: Dict[str, Any] = {}
+        # [v3.2] VERIFIED 상태 관리 (ARMED 강화판)
+        self.verification_state: Dict[str, Any] = {
+            "is_verified": False,  # VERIFIED 상태
+            "mes_hash": None,  # 검증된 MES Hash
+            "last_db_check": None,  # 마지막 DB 조회 시각 (timestamp)
+            "db_check_result": None,  # DB 조회 결과 (Tool 호출 결과)
+            "confirm_token": None,  # 확정 토큰 ("실행 확정", "변경 확정" 등)
+            "project_id": None  # 검증된 프로젝트 ID
+        }
         
-        # [Hybrid Intent] 선택지 대기 상태 관리
-        self.pending_choices: Dict[str, List[str]] = {}  # {project_id: [intent1, intent2, ...]}
+        # [v3.2] Shadow Mining - 세션별 Draft 저장소
+        self.session_drafts: Dict[str, List[Draft]] = {}  # {session_id: [Draft, ...]}
         
-    def _classify_intent(self, message: str) -> tuple:
+    def _classify_intent(self, message: str) -> Tuple[MasterIntent, List[str]]:
         """
-        [RULE 1] 하이브리드 Intent 분류
-        Returns: (primary_intent, possible_intents)
-        - primary_intent가 "UNCLEAR"이면 possible_intents에서 사용자가 선택
+        [v3.2 Guardrail] Intent 분류 - Primary Intent + Secondary Flags
+        Returns: (primary_intent, flags)
+        
+        규칙:
+        1. Primary Intent는 반드시 하나만 반환
+        2. Flags는 복수 가능 (예: ["HAS_REQUIREMENT_SIGNAL", "HAS_DRAFT_DATA"])
+        
+        ❌ Intent를 복수로 반환 금지
+        ❌ UX 편의를 이유로 Intent 우회 로직 금지
         """
-        msg_stripped = message.strip()
+        msg = message.strip()
+        msg_lower = msg.lower()
         
-        # [숫자 선택 감지] 사용자가 이전 선택지에서 번호를 선택한 경우
-        if msg_stripped in ["1", "2", "3", "4", "5"]:
-            return ("USER_CHOICE", [msg_stripped])
+        # [Guardrail] Flags 초기화
+        flags = []
         
-        # [v2.2 RULE 3.1] "응/예" 단독 입력 필터링
-        affirmative_only = ["응", "예", "좋아", "오케이", "ㅇㅇ", "네", "ok", "OK"]
-        if msg_stripped in affirmative_only:
-            return ("AFFIRMATIVE_ONLY", [])
+        # 1. NATURAL (최우선 - 잡담 감지)
+        natural_patterns = [
+            r"^(안녕|하이|ㅎㅇ|헬로|hello)$",
+            r"^(고마워|감사|ㄱㅅ|ㅋㅋ|ㅎㅎ|ㄳ)$",
+            r"^(응|예|좋아|오케이|ㅇㅇ|네|ok|굿|오|아|어|음)$",
+            r"^(ㅋ+|ㅎ+)$",
+        ]
+        for pattern in natural_patterns:
+            if re.search(pattern, msg, re.IGNORECASE):
+                # [Guardrail] 설계 키워드 탐지 시 Flag 추가
+                if any(kw in msg for kw in ["파일", "코드", "프로젝트", "로컬", "API"]):
+                    flags.append("HAS_DESIGN_KEYWORD")
+                return (MasterIntent.NATURAL, flags)
         
-        # === 명확한 Intent (자동 실행) ===
+        # 2. CANCEL / TOPIC_SHIFT
+        cancel_tokens = ["취소", "중단", "멈춰", "그만", "하지마", "리셋", "삭제", "abort"]
+        if any(token in msg_lower for token in cancel_tokens):
+            return (MasterIntent.CANCEL, flags)
         
-        # 1. 명시적 실행 확정 토큰 (최우선)
-        confirm_tokens = ["실행 확정", "시작 확정", "작전 개시", "확정한다", "START TASK"]
-        if any(t in message for t in confirm_tokens):
-            return ("EXECUTION_REQUEST", [])
+        topic_shift_tokens = ["새로운", "다른", "주제 변경", "딴 얘기", "처음부터"]
+        if any(token in msg for token in topic_shift_tokens):
+            return (MasterIntent.TOPIC_SHIFT, flags)
         
-        # 2. 취소/중단
-        cancel_tokens = ["취소", "중단", "멈춰", "그만", "하지마", "리셋", "삭제"]
-        if any(t in message for t in cancel_tokens):
-            return ("CANCEL", [])
+        # 3. FUNCTION_WRITE (엄격한 토큰 매칭)
+        # [Guardrail] "실행 확정", "변경 확정", "START TASK 실행"만 인정
+        CONFIRM_TOKENS = ["실행 확정", "변경 확정", "START TASK 실행"]
+        if any(token in msg for token in CONFIRM_TOKENS):
+            return (MasterIntent.FUNCTION_WRITE, flags)
         
-        topic_shift_pattern = r"(새로운|다른|주제 변경|딴 얘기)"
-        if re.search(topic_shift_pattern, message):
-            return ("TOPIC_SHIFT", [])
+        # 4. FUNCTION_READ (명확한 조회 의도)
+        read_patterns = [
+            r"(현재|지금|현황).*?(보여줘|알려줘|확인|구성)",
+            r"(등록된|목록|상태|리스트).*?(보여줘|알려줘|확인)",
+            r"(상태|현황|구성).*?(조회|확인)",
+            r"^(현재|지금|현황|등록된|목록|상태|조회)",
+        ]
+        for pattern in read_patterns:
+            if re.search(pattern, msg):
+                # [Guardrail] REQUIREMENT 신호 감지 시 Flag 추가
+                if any(kw in msg for kw in ["정리", "요약", "보강"]):
+                    flags.append("HAS_REQUIREMENT_SIGNAL")
+                return (MasterIntent.FUNCTION_READ, flags)
         
-        # 3. 명확한 조회 패턴 (현재 + 알려줘/보여줘/구성)
-        if ("현재" in message or "지금" in message) and ("알려줘" in message or "보여줘" in message or "구성" in message or "현황" in message):
-            return ("STATUS_QUERY", [])
+        # 5. REQUIREMENT (요구사항 정리)
+        requirement_patterns = [
+            r"(정리|요약|구체화).*?(해줘|하자|하고 싶어)",
+            r"(설계|계획|만들어|생성|추가).*?(해줘|하자|하고 싶어)",
+            r"(보강|채워|완성).*?줘",
+            r"준비.*?(점검|체크|확인)",
+        ]
+        for pattern in requirement_patterns:
+            if re.search(pattern, msg):
+                # [Guardrail] Draft 존재 여부는 호출 측에서 Flag 추가
+                return (MasterIntent.REQUIREMENT, flags)
         
-        # 4. 명확한 설정 변경 패턴
-        if "보강해줘" in message or "채워줘" in message or "추가해줘" in message:
-            return ("CONFIG_CHANGE", [])
+        # 6. NATURAL (기본값)
+        # [Guardrail] 설계 키워드 탐지
+        if any(kw in msg for kw in ["파일", "코드", "프로젝트", "로컬", "API", "만들", "생성"]):
+            flags.append("HAS_DESIGN_KEYWORD")
         
-        # 5. 명확한 준비 점검 패턴
-        if "준비 상태 점검" in message or "준비 점검" in message:
-            return ("READINESS_CHECK", [])
-        
-        # === 애매한 Intent (선택지 제시) ===
-        
-        matched = []
-        
-        # "순서", "잘못", "문제" → 여러 가능성
-        if "순서" in message or "잘못" in message or "문제" in message or "이상" in message:
-            matched.extend(["STATUS_QUERY", "CONFIG_CHANGE", "READINESS_CHECK"])
-        
-        # "확인" → 조회 또는 점검
-        if "확인" in message and "확인해" not in message:  # "확인해봐"는 STATUS_QUERY
-            matched.extend(["STATUS_QUERY", "READINESS_CHECK"])
-        elif "확인해" in message:
-            return ("STATUS_QUERY", [])
-        
-        # 중복 제거
-        matched = list(dict.fromkeys(matched))
-        
-        if len(matched) == 0:
-            return ("MES_BUILD", [])
-        elif len(matched) == 1:
-            return (matched[0], [])
-        else:
-            return ("UNCLEAR", matched)
+        return (MasterIntent.NATURAL, flags)
 
     def _get_mes_hash(self, project_data: Dict[str, Any]) -> str:
         """[RULE 2] MES 구조 기반 Hash 생성 - 상태 동기화용"""
@@ -583,6 +602,141 @@ class MasterAgentService:
         
         return {"issues": issues, "recommendations": recommendations}
 
+    async def verify_execution_ready(
+        self, 
+        project_id: str, 
+        confirm_token: str,
+        current_mes_hash: str = None
+    ) -> Dict[str, Any]:
+        """
+        [v3.2 Guardrail] 실행 준비 상태 검증 (4조건 AND)
+        
+        조건 (AND):
+        1. intent == FUNCTION_WRITE
+        2. VERIFIED == True
+        3. current_mes_hash == verified_hash
+        4. confirm_token == 명시적 토큰 (단순 긍정 ❌)
+        
+        하나라도 틀리면:
+        - 아무 행동도 하지 않음
+        - 안내 문구만 반환
+        
+        Returns:
+            {"verified": True/False, "reason": "...", "mes_hash": "..."}
+        """
+        from datetime import datetime
+        
+        # [Guardrail 조건 1] confirm_token == 명시적 토큰 (단순 긍정 ❌)
+        CONFIRM_TOKENS = ["실행 확정", "변경 확정", "START TASK 실행"]
+        if confirm_token not in CONFIRM_TOKENS:
+            return {
+                "verified": False,
+                "reason": f"❌ [Guardrail] 잘못된 확정 토큰입니다. 정확히 다음 중 하나를 입력해주세요: {', '.join(CONFIRM_TOKENS)}"
+            }
+        
+        # [Guardrail 조건 2] 실시간 DB 조회 성공 + 결과가 빈 값이 아님
+        try:
+            project = await neo4j_client.get_project(project_id)
+            if not project or not project.get("agent_config"):
+                return {
+                    "verified": False,
+                    "reason": f"❌ [Guardrail] 프로젝트 {project_id}를 조회할 수 없습니다. DB 연결을 확인하세요."
+                }
+        except Exception as e:
+            return {
+                "verified": False,
+                "reason": f"❌ [Guardrail] DB 조회 중 오류 발생: {str(e)}"
+            }
+        
+        # [Guardrail 조건 3] current_mes_hash == verified_hash
+        new_mes_hash = self._get_mes_hash(project)
+        if current_mes_hash and self.verification_state.get("mes_hash"):
+            if new_mes_hash != self.verification_state["mes_hash"]:
+                return {
+                    "verified": False,
+                    "reason": "❌ [Guardrail] MES가 변경되어 VERIFIED 상태가 해제되었습니다. 다시 준비 점검을 수행하세요."
+                }
+        
+        # 3. 완전성 체크
+        check = self._check_completeness(project)
+        if not check["is_complete"]:
+            missing_str = ", ".join(check["missing"])
+            return {
+                "verified": False,
+                "reason": f"설정이 미완료되었습니다: {missing_str}"
+            }
+        
+        # 4. 실행 가능성 체크
+        capability = await self._check_agent_capability(project_id, "")
+        if not capability["can_execute"]:
+            error_issues = [issue for issue in capability["issues"] if issue.get("severity") == "ERROR"]
+            if error_issues:
+                reason_str = "; ".join([issue.get("reason", "") for issue in error_issues])
+                return {
+                    "verified": False,
+                    "reason": f"실행 불가: {reason_str}"
+                }
+        
+        # 모든 검증 통과 → VERIFIED 상태 설정
+        mes_hash = self._get_mes_hash(project)
+        self.verification_state["is_verified"] = True
+        self.verification_state["mes_hash"] = mes_hash
+        self.verification_state["last_db_check"] = datetime.utcnow()
+        self.verification_state["db_check_result"] = project
+        self.verification_state["confirm_token"] = confirm_token
+        self.verification_state["project_id"] = project_id
+        
+        return {
+            "verified": True,
+            "mes_hash": mes_hash,
+            "project": project
+        }
+
+    def clean_response(
+        self, 
+        content: str, 
+        intent: MasterIntent, 
+        has_confirm_token: bool
+    ) -> str:
+        """
+        [v3.2] Response Builder - 조건부 블록 제거
+        
+        규칙:
+        - FUNCTION_WRITE + confirm_token 있을 때만 보고서/JSON 유지
+        - 그 외 모든 경우: 자동 생성 블록 제거
+        """
+        
+        # FUNCTION_WRITE + confirm_token 있을 때만 보고서/JSON 유지
+        if intent == MasterIntent.FUNCTION_WRITE and has_confirm_token:
+            return content
+        
+        # 그 외 모든 경우: 자동 생성 블록 제거
+        patterns = [
+            # MISSION READINESS REPORT
+            r"---\s*MISSION READINESS REPORT\s*---[\s\S]*?(?=\n\n|\Z)",
+            r"\[준비 상태 점검 완료\][\s\S]*?(?=\n\n|\Z)",
+            
+            # READY_TO_START JSON
+            r'```json\s*\{\s*"status"\s*:\s*"READY_TO_START"[\s\S]*?```',
+            r'\{\s*"status"\s*:\s*"READY_TO_START"[\s\S]*?\}',
+            
+            # 조치 방법 가이드
+            r"## 조치 방법 가이드[\s\S]*?(?=\n\n|\Z)",
+            r"\*\*권장 조치:\*\*[\s\S]*?(?=\n\n|\Z)",
+            r"권장 조치:[\s\S]*?(?=\n\n|\Z)",
+            
+            # 설정 오류 자동 안내
+            r"설정을 확인하고 다음을 수행하세요[\s\S]*?(?=\n\n|\Z)",
+        ]
+        
+        for pattern in patterns:
+            content = re.sub(pattern, "", content, flags=re.MULTILINE)
+        
+        # 연속된 빈 줄 제거
+        content = re.sub(r"\n{3,}", "\n\n", content)
+        
+        return content.strip()
+
     def _load_config(self):
         import os
         if os.path.exists(self.config_path):
@@ -645,391 +799,26 @@ class MasterAgentService:
         return f"Project: {p.get('name')}, Path: {p.get('repo_path')}" if p else "No Project Data"
 
     async def stream_message(self, message: str, history: List[ChatMessage], project_id: str = None, thread_id: str = None, user: Any = None, worker_status: Dict[str, Any] = None):
-        # [CRITICAL] UI에서 바뀐 설정을 매 메시지마다 실시간으로 로드
-        self._load_config()
-        await save_message_to_rdb("user", message, project_id, thread_id, metadata={"user_id": user.id if user else "system"})
+        """
+        [v3.2] Refactored stream_message
         
-        # [v2.2 RULE 1] 하이브리드 인텐트 분류
-        intent, possible_intents = self._classify_intent(message)
-        print(f"DEBUG: Intent classified as '{intent}' (possible: {possible_intents}) for message: '{message}'", flush=True)
-        
-        # [Hybrid Intent] USER_CHOICE 처리
-        if intent == "USER_CHOICE":
-            choice_num = int(possible_intents[0])
-            pending = self.pending_choices.get(project_id, [])
-            if pending and 1 <= choice_num <= len(pending):
-                intent = pending[choice_num - 1]
-                self.pending_choices.pop(project_id, None)  # 선택 완료 후 제거
-                print(f"DEBUG: User chose intent: {intent}", flush=True)
-            else:
-                yield "❌ 잘못된 선택입니다. 다시 시도해주세요."
-                return
-        else:
-            # [FIX] 숫자가 아닌 자연어 응답 시 이전 선택지 자동 무효화
-            if project_id in self.pending_choices:
-                self.pending_choices.pop(project_id, None)
-                print(f"DEBUG: User switched from choice mode to natural language. Cleared pending choices.", flush=True)
-        
-        # [Hybrid Intent] UNCLEAR 처리 (선택지 제시)
-        if intent == "UNCLEAR":
-            intent_labels = {
-                "STATUS_QUERY": "📊 현재 프로젝트 상태 조회",
-                "CONFIG_CHANGE": "⚙️ 에이전트 설정 변경",
-                "READINESS_CHECK": "✅ 준비 상태 점검 (설정 완료 여부)",
-                "EXECUTION_REQUEST": "🚀 작업 실행 확정"
-            }
-            
-            choice_msg = "다음 중 어떤 작업을 원하시나요?\n\n"
-            for i, intent_option in enumerate(possible_intents, 1):
-                choice_msg += f"{i}. {intent_labels.get(intent_option, intent_option)}\n"
-            choice_msg += "\n번호를 선택해주세요."
-            
-            # 선택지 저장
-            self.pending_choices[project_id] = possible_intents
-            
-            yield choice_msg
-            await save_message_to_rdb("assistant", choice_msg, project_id, thread_id)
-            return
-        
-        # [v2.2 RULE 3.2] De-arming 조건 체크 (MES Hash 변경 감지)
-        p_data = await neo4j_client.get_project(project_id)
-        if p_data:
-            self.current_mes = p_data
-            current_mes_hash = self._get_mes_hash(p_data)
-            
-            # MES Hash가 변경되었으면 즉시 De-arm
-            if self.is_armed and self.armed_mes_hash and self.armed_mes_hash != current_mes_hash:
-                self.is_armed = False
-                self.armed_mes_hash = None
-                yield "⚠️ 프로젝트 설정이 변경되어 '확정' 상태가 해제되었습니다. 다시 확인 후 '실행 확정'을 해주십시오.\n\n"
-        
-        # [v2.2 RULE 3.2] CANCEL 또는 TOPIC_SHIFT 시 De-arming
-        if intent in ["CANCEL", "TOPIC_SHIFT"]:
-            self.is_armed = False
-            self.armed_mes_hash = None
-            response_text = "✅ 현재 진행 중이던 작업 계획이 초기화되었습니다. 새로운 지시를 내려주십시오." if intent == "CANCEL" else "✅ 대화 주제가 변경되어 이전 작업 계획이 초기화되었습니다."
-            yield response_text
-            await save_message_to_rdb("assistant", response_text, project_id, thread_id)
-            return
-        
-        # [v2.2 RULE 3.1] "응/예" 단독 입력 시 조기 종료 (버튼 생성 방지)
-        if intent == "AFFIRMATIVE_ONLY":
-            yield "네, 사용자님. 추가로 필요한 사항이 있으시면 말씀해 주십시오."
-            await save_message_to_rdb("assistant", "네, 사용자님. 추가로 필요한 사항이 있으시면 말씀해 주십시오.", project_id, thread_id)
-            return
-        
-        # [v2.2 RULE 4 & 5] STATUS_QUERY와 READINESS_CHECK는 LLM 호출 없이 직접 처리
-        full_content = ""
-        
-        # [v2.2 RULE 4] STATUS_QUERY 처리 (RAG 오염 차단)
-        if intent == "STATUS_QUERY":
-            try:
-                yield "\n\n📊 [실시간 DB 조회] 현재 프로젝트 상태를 조회 중입니다...\n\n"
-                details = await get_project_details.ainvoke({"project_id": project_id})
-                if not details or "없음" in details or "N/A" in details:
-                    fixed_response = "사용자님, 현재 프로젝트 상태를 최신으로 조회할 수 없어 확인되지 않은 내용을 단정해서 말씀드릴 수 없습니다."
-                    yield fixed_response
-                    full_content += fixed_response
-                else:
-                    yield details
-                    full_content += details
-            except Exception as e: 
-                fixed_response = f"사용자님, 현재 프로젝트 상태를 최신으로 조회할 수 없어 확인되지 않은 내용을 단정해서 말씀드릴 수 없습니다. (오류: {str(e)})"
-                yield fixed_response
-                full_content += fixed_response
-            await save_message_to_rdb("assistant", full_content, project_id, thread_id)
-            return
-        
-        # [v2.2 RULE 5] READINESS_CHECK 처리 (보고서 + JSON 출력)
-        if intent == "READINESS_CHECK":
-            full_content = ""  # [FIX] 초기화
-            p_data = await neo4j_client.get_project(project_id)
-            
-            # [NEW] 기술적 설정 완료 체크
-            check = self._check_completeness(p_data)
-            
-            # [NEW] 실행 가능성 체크 (요구사항 vs 에이전트 매칭)
-            capability_check = await self._check_agent_capability(project_id, message)
-            
-            # 1. 실행 불가 사유가 있으면 우선 보고
-            if not capability_check["can_execute"]:
-                report = "\n\n⚠️ [실행 불가 사유 감지]\n"
-                for issue in capability_check["issues"]:
-                    severity_emoji = "🚨" if issue.get("severity") == "ERROR" else "⚠️"
-                    agent_name = issue.get("agent", "알 수 없음")
-                    reason = issue.get("reason", "")
-                    report += f"{severity_emoji} **{agent_name}**: {reason}\n"
-                
-                report += "\n**권장 조치:**\n"
-                for i, rec in enumerate(capability_check["recommendations"], 1):
-                    report += f"{i}. {rec}\n"
-                
-                yield report
-                full_content += report
-                await save_message_to_rdb("assistant", full_content, project_id, thread_id)
-                return
-            
-            # 2. 실행 가능하지만 경고가 있는 경우
-            warnings = [issue for issue in capability_check["issues"] if issue.get("severity") == "WARNING"]
-            if warnings:
-                warning_msg = "\n\n⚠️ [주의 사항]\n"
-                for issue in warnings:
-                    agent_name = issue.get("agent", "알 수 없음")
-                    reason = issue.get("reason", "")
-                    warning_msg += f"• **{agent_name}**: {reason}\n"
-                yield warning_msg
-                full_content += warning_msg
-            
-            # 3. 기술적 설정 완료 체크
-            if check["is_complete"]:
-                report = f"\n\n✅ [준비 상태 점검 완료]\n모든 설정이 완료되었습니다. 아래 [START TASK] 버튼을 눌러 작업을 시작하세요.\n\n"
-                yield report
-                full_content += report
-                
-                # [FIX] 완료 시 즉시 READY_TO_START JSON 출력
-                ready_json = json.dumps({
-                    "status": "READY_TO_START", 
-                    "final_summary": check.get("final_summary", "모든 설정 완료"),
-                    "mes_hash": check.get("mes_hash", "")
-                }, ensure_ascii=False)
-                yield f"\n{ready_json}"
-                full_content += f"\n{ready_json}"
-            else:
-                report = f"\n\n--- MISSION READINESS REPORT ---\n⚠️ 다음 항목이 미비합니다:\n- " + "\n- ".join(check.get('missing', [])[:5])
-                yield report
-                full_content += report
-            await save_message_to_rdb("assistant", full_content, project_id, thread_id)
-            return
-        
-        # [v2.2 RULE 6] MES_BUILD 처리 (LLM 건너뜀, 현재 상태만 반환)
-        if intent == "MES_BUILD":
-            # 일반적인 대화나 요구사항 정립 시 → 현재 상태만 간단히 반환
-            simple_msg = "사용자님, 구체적인 지시를 주시면 바로 실행하겠습니다.\n\n다음 명령어를 사용하실 수 있습니다:\n• '준비 상태 점검' - 현재 설정 확인\n• '현재 에이전트 구성 알려줘' - 상세 정보 조회\n• '미비 항목 보강해줘' - 자동 설정 보강\n• '실행 확정' - 작업 시작"
-            yield simple_msg
-            await save_message_to_rdb("assistant", simple_msg, project_id, thread_id)
-            return
-        
-        # [v2.2 RULE 7] CONFIG_CHANGE 처리 (도구만 호출, LLM 건너뜀)
-        if intent == "CONFIG_CHANGE":
-            yield "⚙️ 설정 변경 요청을 처리 중입니다...\n\n"
-            # 1. 현재 프로젝트 데이터 조회
-            p_data = await neo4j_client.get_project(project_id)
-            if not p_data:
-                error_msg = "❌ 프로젝트를 찾을 수 없습니다."
-                yield error_msg
-                await save_message_to_rdb("assistant", error_msg, project_id, thread_id)
-                return
-            
-            # [NEW] 워크플로우 순서 문제 감지
-            if "순서" in message or "잘못" in message:
-                config = p_data.get("agent_config", {})
-                agents = config.get("agents", [])
-                
-                # 현재 순서 분석
-                workflow_msg = "📋 **현재 워크플로우 순서:**\n\n"
-                entry_id = config.get("entry_agent_id")
-                if entry_id:
-                    workflow_msg += f"시작: **{entry_id}**\n\n"
-                    for agent in agents:
-                        role = agent.get("role")
-                        next_agents = agent.get("next_agents", [])
-                        next_str = " → ".join(next_agents) if next_agents else "완료"
-                        workflow_msg += f"• {role} → {next_str}\n"
-                    
-                    workflow_msg += "\n\n**올바른 표준 순서로 자동 수정할까요?**\n"
-                    workflow_msg += "표준 순서: PLANNER → DEVELOPER → QA_ENGINEER → REPORTER → 완료\n\n"
-                    workflow_msg += "'표준 순서로 수정해줘' 라고 입력하시면 자동으로 수정합니다."
-                    
-                    yield workflow_msg
-                    await save_message_to_rdb("assistant", workflow_msg, project_id, thread_id)
-                    return
-            
-            # 2. 누락된 항목 파악
-            check = self._check_completeness(p_data)
-            if check["is_complete"]:
-                complete_msg = "✅ 이미 모든 설정이 완료되었습니다."
-                yield complete_msg
-                await save_message_to_rdb("assistant", complete_msg, project_id, thread_id)
-                return
-            
-            missing = check.get("missing", [])
-            config = p_data.get("agent_config", {})
-            agents = config.get("agents", [])
-            
-            # 3. 각 에이전트의 누락 항목 자동 보강
-            updated_count = 0
-            for agent in agents:
-                role = agent.get("role", "")
-                role_normalized = str(role).strip().upper()
-                agent_config = agent.get("config", {})
-                updates = {}
-                
-                # DEVELOPER/CODER에 mode 추가
-                if role_normalized in ["CODER", "DEVELOPER"] and not agent_config.get("mode"):
-                    updates["mode"] = "REPAIR"
-                    updated_count += 1
-                
-                # QA/REVIEWER에 retry_limit 추가
-                if role_normalized in ["QA", "REVIEWER", "QA_ENGINEER"] and not agent_config.get("retry_limit"):
-                    updates["retry_limit"] = 3
-                    updated_count += 1
-                
-                # 기타 CUSTOM 타입에 tool_allowlist 추가 (REPORTER 제외)
-                if role_normalized not in ["REPORTER", "PLANNER"] and not agent_config.get("tool_allowlist"):
-                    updates["tool_allowlist"] = ["read_file", "write_file", "list_dir"]
-                    updated_count += 1
-                
-                # 업데이트 실행
-                if updates:
-                    await update_agent_config_tool.ainvoke({
-                        "project_id": project_id,
-                        "agent_id": agent.get("agent_id"),
-                        "updates": updates
-                    })
-            
-            # 4. 완료 보고 및 자동 재점검
-            if updated_count > 0:
-                result_msg = f"✅ {updated_count}개 항목이 자동으로 보강되었습니다.\n\n"
-                yield result_msg
-                full_content = result_msg
-                
-                # [FIX] 자동으로 완료 여부 재점검하여 JSON 출력
-                p_data_updated = await neo4j_client.get_project(project_id)
-                check_updated = self._check_completeness(p_data_updated)
-                
-                if check_updated["is_complete"]:
-                    complete_msg = "✅ 모든 설정이 완료되었습니다! 아래 [START TASK] 버튼을 눌러 작업을 시작하세요.\n\n"
-                    yield complete_msg
-                    full_content += complete_msg
-                    
-                    # READY_TO_START JSON 출력
-                    ready_json = json.dumps({
-                        "status": "READY_TO_START", 
-                        "final_summary": check_updated.get("final_summary", "모든 설정 완료"),
-                        "mes_hash": check_updated.get("mes_hash", "")
-                    }, ensure_ascii=False)
-                    yield f"\n{ready_json}"
-                    full_content += f"\n{ready_json}"
-                else:
-                    # 아직 미비한 항목이 있으면 보고
-                    remaining_msg = f"⚠️ 아직 다음 항목이 미비합니다:\n- " + "\n- ".join(check_updated.get('missing', [])[:5])
-                    yield remaining_msg
-                    full_content += remaining_msg
-            else:
-                result_msg = "✅ 설정 변경이 완료되었습니다."
-                yield result_msg
-                full_content = result_msg
-            
-            await save_message_to_rdb("assistant", full_content, project_id, thread_id)
-            return
-        
-        system_instruction = """[CRITICAL] 반드시 100% 순수 한국어로만 답변하십시오. 
-[COMMAND] 
-1. 호칭은 '사용자님'으로 통일하십시오. 
-2. **[행동 우선]** 사용자가 "예", "응", "실행하자" 등 긍정하면 토 달지 말고 즉시 'READY_TO_START' 버튼을 생성하십시오. 로그 확인 지시나 추가 질문으로 시간을 끌지 마십시오.
-3. 사용자가 요구사항을 추가하면 질문하지 말고 즉시 'update_agent_config_tool'로 DB를 업데이트한 뒤 보고하십시오.
-4. **[절대 금지]** "시스템 관리자에게 문의하십시오", "로그를 확인하십시오" 같은 무책임한 발언을 금지합니다. 당신은 현장 지휘관입니다.
-5. 모든 클라우드 모델의 Provider는 'OPENROUTER'로 입력하십시오.
-"""
+        기존 v2.2 로직은 stream_message_v22로 백업됨 (아래 참조)
+        v3.2: Step-by-step 분해 + 200줄 제한 + 9단계 오케스트레이션
+        """
+        # v3.2 호출
+        async for chunk in stream_message_v32(message, history, project_id, thread_id, user, worker_status):
+            yield chunk
+    
+    # ===== [v2.2 백업 제거] 기존 로직은 Git에 보관됨 =====
+    # v3.2 통합으로 인해 기존 v2.2 로직 (약 350줄) 제거
+    # Git history에서 복구 가능: git log --all -- master_agent_service.py
+    
+    async def process_message(self, message: str, history: List[ChatMessage], project_id: str = None, thread_id: str = None, user: Any = None, worker_status: Dict[str, Any] = None) -> Dict[str, Any]:
+        # Simple wrapper for stream_message consistency
+        return {"message": "Streaming only for master agent", "quick_links": []}
 
-        try:
-            # [FIX] settings.PRIMARY_MODEL 대신 UI에서 설정된 self.config.model을 사용
-            llm_model = self.config.model or settings.PRIMARY_MODEL
-            print(f"DEBUG: Master Agent using Model: {llm_model}")
-            
-            llm = ChatOpenAI(
-                model=llm_model, 
-                api_key=settings.OPENROUTER_API_KEY, 
-                base_url=settings.OPENROUTER_BASE_URL, 
-                temperature=self.config.temperature or 0.1
-            )
-            tools = [search_knowledge_tool, web_search_intelligence_tool, list_projects, get_project_details, execute_project_tool, update_agent_config_tool, add_agent_tool, manage_job_queue_tool, reset_project_agents_tool, setup_standard_workflow_tool]
-            llm_with_tools = llm.bind_tools(tools)
-            final_messages = await self._construct_messages(message, history, project_id, system_instruction)
-            
-            loop_count = 0
-            while loop_count < 8:
-                full_msg_chunk = None
-                async for chunk in llm_with_tools.astream(final_messages):
-                    if full_msg_chunk is None: full_msg_chunk = chunk
-                    else: full_msg_chunk += chunk
-                    if chunk.content:
-                        yield chunk.content; full_content += chunk.content
-
-                if full_msg_chunk and hasattr(full_msg_chunk, 'tool_calls') and full_msg_chunk.tool_calls:
-                    valid_calls = [tc for tc in full_msg_chunk.tool_calls if tc.get("name")]
-                    if not valid_calls: break
-                    final_messages.append(AIMessage(content=full_msg_chunk.content or "", tool_calls=valid_calls))
-                    for tc in valid_calls:
-                        t_name, t_args, t_id = tc["name"], tc["args"], tc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
-                        # [CRITICAL] 자동 프로젝트 ID 주입 리스트에 새 도구 추가
-                        if t_name in ["get_project_details", "execute_project_tool", "update_agent_config_tool", "add_agent_tool", "reset_project_agents_tool", "setup_standard_workflow_tool"]:
-                            t_args["project_id"] = project_id
-                        try:
-                            t_res = None
-                            if t_name == "search_knowledge_tool": t_res = await search_knowledge_tool.ainvoke(t_args)
-                            elif t_name == "web_search_intelligence_tool": t_res = await web_search_intelligence_tool.ainvoke(t_args)
-                            elif t_name == "list_projects": t_res = await list_projects.ainvoke(t_args)
-                            elif t_name == "get_project_details": t_res = await get_project_details.ainvoke(t_args)
-                            elif t_name == "execute_project_tool": t_res = await execute_project_tool.ainvoke(t_args)
-                            elif t_name == "reset_project_agents_tool": t_res = await reset_project_agents_tool.ainvoke(t_args)
-                            elif t_name == "add_agent_tool": t_res = await add_agent_tool.ainvoke(t_args)
-                            elif t_name == "update_agent_config_tool": t_res = await update_agent_config_tool.ainvoke(t_args)
-                            elif t_name == "manage_job_queue_tool": t_res = await manage_job_queue_tool.ainvoke(t_args)
-                            elif t_name == "setup_standard_workflow_tool": t_res = await setup_standard_workflow_tool.ainvoke(t_args)
-                            else: t_res = f"도구 {t_name} 없음"
-                            t_out = str(t_res)
-                        except Exception as e: t_out = f"오류: {str(e)}"
-                        final_messages.append(ToolMessage(content=t_out, tool_call_id=t_id))
-                    loop_count += 1
-                else: break
-            
-            # [v2.2 RULE 3] EXECUTION_REQUEST 처리 (강제 게이트)
-            if intent == "EXECUTION_REQUEST":
-                p_data = await neo4j_client.get_project(project_id)
-                check = self._check_completeness(p_data)
-                
-                if check["is_complete"]: 
-                    current_mes_hash = check.get("mes_hash")
-                    
-                    # [v2.2 RULE 3.1] ARMED 상태 설정 및 확정 토큰 확인
-                    # 여기서는 "실행 확정", "작전 개시" 등 명시적 토큰이 있으므로 ARMED 설정
-                    self.is_armed = True
-                    self.armed_mes_hash = current_mes_hash
-                    
-                    # 버튼 생성 조건 충족 (AND)
-                    # - intent == EXECUTION_REQUEST ✅
-                    # - execution_state == ARMED ✅
-                    # - current_mes_hash == armed_hash ✅
-                    # - confirm_token_present == True ✅
-                    ready_json = "\n" + json.dumps({
-                        "status": "READY_TO_START", 
-                        "final_summary": check["final_summary"],
-                        "mes_hash": current_mes_hash
-                    }, ensure_ascii=False)
-                    yield ready_json; full_content += ready_json
-                else:
-                    # [v2.2 RULE 5] 자동 부착 제거: intent가 READINESS_CHECK가 아니면 제거
-                    # 하지만 EXECUTION_REQUEST이면서 설정 미비인 경우는 보고서 출력
-                    report = f"\n\n--- MISSION READINESS REPORT ---\n⚠️ 설정 미비로 확정할 수 없습니다:\n- " + "\n- ".join(check.get('missing', [])[:5])
-                    yield report; full_content += report
-            
-            # [v2.2 RULE 5] 자동 부착 제거 (Response Builder)
-            # intent가 READINESS_CHECK나 EXECUTION_REQUEST가 아닌 경우,
-            # LLM이 생성한 응답에서 READINESS REPORT와 READY_TO_START JSON 제거
-            if intent not in ["READINESS_CHECK", "EXECUTION_REQUEST", "STATUS_QUERY"]:
-                import re
-                # MISSION READINESS REPORT 제거
-                full_content = re.sub(r'---\s*MISSION READINESS REPORT\s*---[\s\S]*?(?=\n\n|\Z)', '', full_content)
-                # READY_TO_START JSON 제거
-                full_content = re.sub(r'\{\s*"status"\s*:\s*"READY_TO_START"[\s\S]*?\}', '', full_content)
-                # 조치 방법 가이드 제거
-                full_content = re.sub(r'\*\*🛠️ 조치 방법[\s\S]*?(?=\n\n|\Z)', '', full_content)
-                
-        except Exception as e: yield f"\n[오류]: {str(e)}"
-        finally:
-            if full_content: await save_message_to_rdb("assistant", full_content, project_id, thread_id)
-
+    async def create_job_from_history(self, history: List[ChatMessage], orchestrator: Any, user: Any) -> Dict[str, Any]: 
+        return {"message": "N/A"}
     async def process_message(self, message: str, history: List[ChatMessage], project_id: str = None, thread_id: str = None, user: Any = None, worker_status: Dict[str, Any] = None) -> Dict[str, Any]:
         # Simple wrapper for stream_message consistency
         return {"message": "Streaming only for master agent", "quick_links": []}

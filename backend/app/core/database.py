@@ -187,3 +187,92 @@ async def get_messages_from_rdb(project_id: str = None, thread_id: str = None, l
         query = query.order_by(MessageModel.timestamp.asc()).limit(limit)
         result = await session.execute(query)
         return result.scalars().all()
+
+# ===== [v3.2] Shadow Mining - Draft Storage =====
+
+async def save_draft_to_rdb(draft: "Draft") -> str:
+    """
+    Draft를 PostgreSQL에 저장
+    Returns: draft_id
+    """
+    from sqlalchemy import Table, Column, String, Text, Integer, DateTime, MetaData
+    from datetime import datetime
+    
+    # Draft 테이블 동적 생성 (없으면 생성)
+    metadata = MetaData()
+    drafts_table = Table(
+        'drafts', metadata,
+        Column('id', String(255), primary_key=True),
+        Column('session_id', String(255), nullable=False, index=True),
+        Column('user_id', String(255), nullable=False),
+        Column('project_id', String(255), nullable=True),
+        Column('status', String(50), nullable=False, default='UNVERIFIED', index=True),
+        Column('category', String(50), nullable=False),
+        Column('content', Text, nullable=False),
+        Column('source', String(50), default='USER_UTTERANCE'),
+        Column('timestamp', DateTime, default=datetime.utcnow, index=True),
+        Column('ttl_days', Integer, default=7),
+        extend_existing=True
+    )
+    
+    async with engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+    
+    async with AsyncSessionLocal() as session:
+        from sqlalchemy import insert
+        stmt = insert(drafts_table).values(
+            id=draft.id,
+            session_id=draft.session_id,
+            user_id=draft.user_id,
+            project_id=draft.project_id,
+            status=draft.status,
+            category=draft.category,
+            content=draft.content,
+            source=draft.source,
+            timestamp=draft.timestamp,
+            ttl_days=draft.ttl_days
+        )
+        await session.execute(stmt)
+        await session.commit()
+        return draft.id
+
+async def get_drafts_from_rdb(session_id: str = None, status: str = "UNVERIFIED") -> List:
+    """
+    Draft 조회
+    """
+    from sqlalchemy import Table, MetaData, select
+    
+    metadata = MetaData()
+    drafts_table = Table('drafts', metadata, autoload_with=engine)
+    
+    async with AsyncSessionLocal() as session:
+        query = select(drafts_table)
+        
+        if session_id:
+            query = query.filter(drafts_table.c.session_id == session_id)
+        if status:
+            query = query.filter(drafts_table.c.status == status)
+        
+        query = query.order_by(drafts_table.c.timestamp.desc())
+        result = await session.execute(query)
+        return result.fetchall()
+
+async def delete_expired_drafts(days: int = 7):
+    """
+    만료된 Draft 삭제 (TTL 기반)
+    """
+    from sqlalchemy import Table, MetaData, delete
+    from datetime import datetime, timedelta
+    
+    metadata = MetaData()
+    drafts_table = Table('drafts', metadata, autoload_with=engine)
+    
+    async with AsyncSessionLocal() as session:
+        expired_time = datetime.utcnow() - timedelta(days=days)
+        stmt = delete(drafts_table).where(
+            drafts_table.c.status == 'UNVERIFIED',
+            drafts_table.c.timestamp < expired_time
+        )
+        result = await session.execute(stmt)
+        await session.commit()
+        return result.rowcount

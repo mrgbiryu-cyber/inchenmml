@@ -10,6 +10,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from fastapi.responses import StreamingResponse
 from app.models.master import MasterAgentConfig, ChatRequest, ChatResponse, ChatMessage
 from app.services.master_agent_service import MasterAgentService
+from app.services.v32_stream_message_refactored import stream_message_v32  # [v3.2] 추가
 from app.api.dependencies import get_current_user
 from app.models.schemas import User
 
@@ -57,11 +58,12 @@ async def chat_stream(
     current_user: User = Depends(get_current_user)
 ):
     """
-    [TODO 8] Streaming chat with Tool Call Interceptor.
+    [v3.2] Streaming chat with v3.2 Intent Router and Guardrails.
     """
     async def event_generator():
         try:
-            async for chunk in service.stream_message(
+            # [v3.2 FIX] stream_message_v32 사용 (리팩토링된 버전)
+            async for chunk in stream_message_v32(
                 request.message, 
                 request.history, 
                 request.project_id, 

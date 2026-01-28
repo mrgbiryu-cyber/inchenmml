@@ -87,6 +87,18 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
     const [limit, setLimit] = useState(20);
     const [hasMore, setHasMore] = useState(true);
     
+    // [Fix] Thread ID Management
+    // prop으로 받은 threadId가 있으면 사용하고, 없으면 내부적으로 생성하여 유지
+    const [currentThreadId, setCurrentThreadId] = useState<string>(() => {
+        return threadId || `thread-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    });
+
+    useEffect(() => {
+        if (threadId) {
+            setCurrentThreadId(threadId);
+        }
+    }, [threadId]);
+    
     // START TASK Gate State
     const [readyToStart, setReadyToStart] = useState(false);
     const [finalSummary, setFinalSummary] = useState('');
@@ -231,7 +243,7 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
             id: Date.now().toString(), 
             role: 'user', 
             content: type === 'job' ? '🚀 START TASK' : input,
-            thread_id: threadId 
+            thread_id: currentThreadId 
         };
         
         setMessages(prev => [...prev, userMsg]);
@@ -290,7 +302,7 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
                         message: userMsg.content,
                         history: messages.map(m => ({ role: m.role, content: m.content })),
                         project_id: effectiveProjectId,
-                        thread_id: threadId
+                        thread_id: currentThreadId
                     })
                 });
 
@@ -298,6 +310,9 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
 
                 const reader = response.body?.getReader();
                 const decoder = new TextDecoder();
+                
+                // [Fix] 스트리밍 시작 시 로딩 상태 해제 (중복 아이콘 방지)
+                setLoading(false);
                 
                 let accumulatedContent = '';
                 const aiMsgId = (Date.now() + 1).toString();
@@ -308,7 +323,7 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
                     role: 'assistant',
                     content: '',
                     hasLogs: false,
-                    thread_id: threadId
+                    thread_id: currentThreadId
                 };
                 setMessages(prev => [...prev, aiMsg]);
 
@@ -418,7 +433,7 @@ export default function ChatInterface({ projectId: propProjectId, threadId }: Ch
                                     <div className="whitespace-pre-wrap text-sm leading-relaxed">
                                         {/* [Fix] 렌더링 시 JSON 신호를 숨깁니다. */}
                                         {msg.role === 'assistant' 
-                                            ? msg.content.replace(/\{[\s\S]*?"status"\s*:\s*"READY_TO_START"[\s\S]*?\}/, '').trim() || "설정이 완료되었습니다. 아래 [START TASK] 버튼을 눌러 작업을 시작해 주세요."
+                                            ? msg.content.replace(/\{[\s\S]*?"status"\s*:\s*"READY_TO_START"[\s\S]*?\}/, '').trim()
                                             : msg.content
                                         }
                                     </div>

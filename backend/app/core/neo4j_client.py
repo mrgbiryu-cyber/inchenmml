@@ -212,79 +212,57 @@ class Neo4jClient:
         return converted
 
     async def save_chat_message(self, project_id: str, role: str, content: str, thread_id: Optional[str] = None, user_id: Optional[str] = None):
-        if self.driver:
-            try:
-                query = """
-                MERGE (p:Project {id: $project_id})
-                ON CREATE SET p.name = CASE WHEN $project_id = 'system-master' THEN 'System Master' ELSE 'Unknown Project' END,
-                              p.tenant_id = 'tenant_hyungnim',
-                              p.user_id = $user_id,
-                              p.project_type = 'SYSTEM',
-                              p.repo_path = 'D:/project/myllm',
-                              p.created_at = datetime(),
-                              p.updated_at = datetime()
-                ON MATCH SET p.repo_path = CASE WHEN $project_id = 'system-master' AND (p.repo_path IS NULL OR p.repo_path = '') THEN 'D:/project/myllm' ELSE p.repo_path END,
-                             p.user_id = COALESCE($user_id, p.user_id)
-                
-                CREATE (m:ChatMessage {
-                    message_id: randomUUID(),
-                    role: $role,
-                    content: $content,
-                    thread_id: $thread_id,
-                    user_id: $user_id,
-                    timestamp: datetime()
-                })
-                CREATE (p)-[:HAS_MESSAGE]->(m)
-                SET p.updated_at = datetime()
-                """
-                async with self.driver.session() as session:
-                    await session.run(query, {
-                        "project_id": project_id,
-                        "role": role,
-                        "content": content,
-                        "thread_id": thread_id,
-                        "user_id": user_id or "system"
-                    })
-                return
-            except Exception as e:
-                print(f"Neo4j save failed: {e}")
+        """
+        [DEPRECATED] ChatMessage 노드는 더 이상 사용하지 않음
+        RDB (PostgreSQL)가 Single Source of Truth
+        대화 맥락은 ConversationChunk 노드로 관리
+        """
+        # 비활성화: 중복 저장 방지
+        pass
 
     async def get_chat_history(self, project_id: str, limit: int = 50, thread_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        messages = []
-        if self.driver:
-            try:
-                if thread_id:
-                    query = """
-                    MATCH (p:Project {id: $project_id})-[:HAS_MESSAGE]->(m:ChatMessage)
-                    WHERE m.thread_id = $thread_id
-                    RETURN m
-                    ORDER BY m.timestamp ASC
-                    LIMIT $limit
-                    """
-                else:
-                    query = """
-                    MATCH (p:Project {id: $project_id})-[:HAS_MESSAGE]->(m:ChatMessage)
-                    RETURN m
-                    ORDER BY m.timestamp ASC
-                    LIMIT $limit
-                    """
-                
-                async with self.driver.session() as session:
-                    result = await session.run(query, {
-                        "project_id": project_id, 
-                        "limit": limit,
-                        "thread_id": thread_id
-                    })
-                    async for record in result:
-                        msg_node = record["m"]
-                        msg_data = dict(msg_node)
-                        if "timestamp" in msg_data:
-                            msg_data["timestamp"] = str(msg_data["timestamp"])
-                        messages.append(msg_data)
-                return messages
-            except Exception as e:
-                print(f"Neo4j fetch failed: {e}")
+        """
+        [DEPRECATED] ChatMessage 노드는 더 이상 사용하지 않음
+        RDB (PostgreSQL)의 get_messages_from_rdb() 사용
+        """
+        # 비활성화: RDB 사용
         return []
+        
+        # messages = []
+        # if self.driver:
+        #     try:
+        #         if thread_id:
+        #             query = """
+        #             MATCH (p:Project {id: $project_id})-[:HAS_MESSAGE]->(m:ChatMessage)
+        #             WHERE m.thread_id = $thread_id
+        #             RETURN m
+        #             ORDER BY m.timestamp ASC
+        #             LIMIT $limit
+        #             """
+        #         else:
+        #             query = """
+        #             MATCH (p:Project {id: $project_id})-[:HAS_MESSAGE]->(m:ChatMessage)
+        #             RETURN m
+        #             ORDER BY m.timestamp ASC
+        #             LIMIT $limit
+        #             """
+        #         
+        #         async with self.driver.session() as session:
+        #             result = await session.run(query, {
+        #                 "project_id": project_id, 
+        #                 "limit": limit,
+        #                 "thread_id": thread_id
+        #             })
+        #             async for record in result:
+        #                 msg_node = record["m"]
+        #                 msg_data = dict(msg_node)
+        #                 if "timestamp" in msg_data:
+        #                     msg_data["timestamp"] = str(msg_data["timestamp"])
+        #                 messages.append(msg_data)
+        #         return messages
+        #     except Exception as e:
+        #         print(f"Neo4j fetch failed: {e}")
+        # return []
 
     async def query_knowledge(self, project_id: str, query_text: str, limit: int = 5) -> List[Dict[str, Any]]:
         if not self.driver: return []
@@ -379,7 +357,8 @@ class Neo4jClient:
             "CREATE INDEX IF NOT EXISTS FOR (n:Requirement) ON (n.title)",
             "CREATE INDEX IF NOT EXISTS FOR (n:Decision) ON (n.title)",
             "CREATE INDEX IF NOT EXISTS FOR (n:Fact) ON (n.claim)",
-            "CREATE INDEX IF NOT EXISTS FOR (n:ChatMessage) ON (n.message_id)"
+            # "CREATE INDEX IF NOT EXISTS FOR (n:ChatMessage) ON (n.message_id)",  # Deprecated
+            "CREATE INDEX IF NOT EXISTS FOR (n:ConversationChunk) ON (n.chunk_id)"  # New
         ]
         async with self.driver.session() as session:
             for q in index_queries:

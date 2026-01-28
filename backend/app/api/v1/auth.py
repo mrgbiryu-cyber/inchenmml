@@ -83,6 +83,15 @@ async def login(login_request: LoginRequest):
     # ⚠️ Check if user exists in our password map
     valid_password = "!@ssw5740" if login_request.username == "admin" else "user123"
     
+    # [DEBUG] 비밀번호 비교 디버깅
+    logger.info(
+        f"Password comparison for {login_request.username}",
+        username=login_request.username,
+        received_password=login_request.password,
+        expected_password=valid_password,
+        match=login_request.password == valid_password
+    )
+    
     if login_request.password != valid_password:
         logger.warning(
             f"Login failed for {login_request.username}: Password mismatch",

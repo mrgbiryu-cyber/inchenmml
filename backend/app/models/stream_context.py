@@ -6,13 +6,13 @@ StreamContext - v3.2 통합 컨텍스트 객체
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from app.schemas.debug import DebugInfo  # [v4.2]
+from app.models.master import ConversationMode # [v4.0]
 
 @dataclass
 class StreamContext:
     """
     [v3.2] stream_message 전체 흐름에서 공유하는 컨텍스트
-    
-    모든 Step은 이 컨텍스트만 읽고/쓴다.
     """
     # === 입력 정보 ===
     session_id: str
@@ -20,7 +20,17 @@ class StreamContext:
     thread_id: Optional[str]
     user_id: Optional[str]
     user_input_raw: str  # 원본 입력
+    
+    # === [v4.2] 검증/감사 메타데이터 ===
+    request_id: str = ""  # 요청 추적 ID (UUID)
+    is_admin: bool = False  # Admin 여부
+    debug_info: DebugInfo = field(default_factory=DebugInfo)  # 검증 데이터 (Retrieval 결과 등)
+
     user_input_norm: str = ""  # 정규화된 입력 (공백/줄바꿈 정리)
+    
+    # === [v4.0] Conversation Mode ===
+    mode: ConversationMode = ConversationMode.NATURAL  # 현재 대화 모드
+    mode_switched: bool = False  # 모드 전환 발생 여부
     
     # === Intent 분류 결과 ===
     llm_intent: Optional[str] = None  # LLM이 추론한 Intent (있으면)

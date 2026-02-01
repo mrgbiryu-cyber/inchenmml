@@ -52,3 +52,6 @@ class TavilyClient:
         except Exception as e:
             print(f"❌ Tavily QnA failed: {e}")
             return f"Error during search: {e}"
+
+# [v5.0] Global search client instance
+search_client = TavilyClient()

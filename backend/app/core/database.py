@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, String, DateTime, Text, JSON, Integer, Float
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 import uuid
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 from datetime import datetime
 import os
 from app.core.config import settings
@@ -71,6 +71,49 @@ class CostLogModel(Base):
     status = Column(String) # success | skip | fail
     timestamp = Column(DateTime, default=datetime.utcnow)
 
+# [v3.2] Draft Model Definition (Fix for AsyncEngine inspection)
+class DraftModel(Base):
+    __tablename__ = "drafts"
+    
+    id = Column(String(255), primary_key=True)
+    session_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(String(255), nullable=False)
+    project_id = Column(String(255), nullable=True)
+    status = Column(String(50), nullable=False, default='UNVERIFIED', index=True)
+    category = Column(String(50), nullable=False)
+    content = Column(Text, nullable=False)
+    source = Column(String(50), default='USER_UTTERANCE')
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    ttl_days = Column(Integer, default=7)
+
+class UserModel(Base):
+    __tablename__ = "users"
+
+    id = Column(String(50), primary_key=True)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    tenant_id = Column(String(50), nullable=False)
+    role = Column(String(20), nullable=False)
+    is_active = Column(Integer, default=1) # 1: True, 0: False (SQLite compat)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class UserProjectModel(Base):
+    __tablename__ = "user_projects"
+
+    user_id = Column(String(50), primary_key=True)
+    project_id = Column(String(50), primary_key=True)
+    role = Column(String(20), default="viewer") # viewer | editor
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+
+class ThreadModel(Base):
+    __tablename__ = "threads"
+
+    id = Column(String(100), primary_key=True)
+    project_id = Column(GUID(), nullable=True) # Matches MessageModel.project_id type
+    title = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 # Database URL Handling
 DATABASE_URL = settings.DATABASE_URL
 if not DATABASE_URL or "postgresql" in DATABASE_URL: # Override local postgresql placeholder
@@ -112,6 +155,7 @@ async def init_db():
         await neo4j_client.create_indexes()
     except Exception as e:
         print(f"⚠️ Failed to create Neo4j indexes during init: {e}")
+
 def _normalize_project_id(project_id: str) -> Optional[uuid.UUID]:
     """
     Task 1.4: Normalize project_id to ensure case-insensitive consistent UUID generation
@@ -121,11 +165,13 @@ def _normalize_project_id(project_id: str) -> Optional[uuid.UUID]:
         return None
     
     try:
+        if isinstance(project_id, uuid.UUID):
+            return project_id
         # If already a valid UUID, return it
         return uuid.UUID(project_id)
     except (ValueError, AttributeError):
         # Normalize: lowercase + strip, then generate deterministic UUID
-        normalized = project_id.lower().strip()
+        normalized = str(project_id).lower().strip()
         return uuid.uuid5(uuid.NAMESPACE_DNS, normalized)
 
 
@@ -190,37 +236,13 @@ async def get_messages_from_rdb(project_id: str = None, thread_id: str = None, l
 
 # ===== [v3.2] Shadow Mining - Draft Storage =====
 
-async def save_draft_to_rdb(draft: "Draft") -> str:
+async def save_draft_to_rdb(draft) -> str:
     """
-    Draft를 PostgreSQL에 저장
+    Draft를 PostgreSQL에 저장 (Using declarative model)
     Returns: draft_id
     """
-    from sqlalchemy import Table, Column, String, Text, Integer, DateTime, MetaData
-    from datetime import datetime
-    
-    # Draft 테이블 동적 생성 (없으면 생성)
-    metadata = MetaData()
-    drafts_table = Table(
-        'drafts', metadata,
-        Column('id', String(255), primary_key=True),
-        Column('session_id', String(255), nullable=False, index=True),
-        Column('user_id', String(255), nullable=False),
-        Column('project_id', String(255), nullable=True),
-        Column('status', String(50), nullable=False, default='UNVERIFIED', index=True),
-        Column('category', String(50), nullable=False),
-        Column('content', Text, nullable=False),
-        Column('source', String(50), default='USER_UTTERANCE'),
-        Column('timestamp', DateTime, default=datetime.utcnow, index=True),
-        Column('ttl_days', Integer, default=7),
-        extend_existing=True
-    )
-    
-    async with engine.begin() as conn:
-        await conn.run_sync(metadata.create_all)
-    
     async with AsyncSessionLocal() as session:
-        from sqlalchemy import insert
-        stmt = insert(drafts_table).values(
+        new_draft = DraftModel(
             id=draft.id,
             session_id=draft.session_id,
             user_id=draft.user_id,
@@ -232,46 +254,41 @@ async def save_draft_to_rdb(draft: "Draft") -> str:
             timestamp=draft.timestamp,
             ttl_days=draft.ttl_days
         )
-        await session.execute(stmt)
+        # Using merge to handle potential updates (upsert behavior)
+        await session.merge(new_draft)
         await session.commit()
         return draft.id
 
 async def get_drafts_from_rdb(session_id: str = None, status: str = "UNVERIFIED") -> List:
     """
-    Draft 조회
+    Draft 조회 (Using declarative model)
     """
-    from sqlalchemy import Table, MetaData, select
-    
-    metadata = MetaData()
-    drafts_table = Table('drafts', metadata, autoload_with=engine)
+    from sqlalchemy import select
     
     async with AsyncSessionLocal() as session:
-        query = select(drafts_table)
+        query = select(DraftModel)
         
         if session_id:
-            query = query.filter(drafts_table.c.session_id == session_id)
+            query = query.filter(DraftModel.session_id == session_id)
         if status:
-            query = query.filter(drafts_table.c.status == status)
+            query = query.filter(DraftModel.status == status)
         
-        query = query.order_by(drafts_table.c.timestamp.desc())
+        query = query.order_by(DraftModel.timestamp.desc())
         result = await session.execute(query)
-        return result.fetchall()
+        return result.scalars().all()
 
 async def delete_expired_drafts(days: int = 7):
     """
-    만료된 Draft 삭제 (TTL 기반)
+    만료된 Draft 삭제 (TTL 기반) (Using declarative model)
     """
-    from sqlalchemy import Table, MetaData, delete
+    from sqlalchemy import delete
     from datetime import datetime, timedelta
-    
-    metadata = MetaData()
-    drafts_table = Table('drafts', metadata, autoload_with=engine)
     
     async with AsyncSessionLocal() as session:
         expired_time = datetime.utcnow() - timedelta(days=days)
-        stmt = delete(drafts_table).where(
-            drafts_table.c.status == 'UNVERIFIED',
-            drafts_table.c.timestamp < expired_time
+        stmt = delete(DraftModel).where(
+            DraftModel.status == 'UNVERIFIED',
+            DraftModel.timestamp < expired_time
         )
         result = await session.execute(stmt)
         await session.commit()

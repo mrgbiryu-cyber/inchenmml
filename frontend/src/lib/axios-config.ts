@@ -4,13 +4,10 @@ import { useAuthStore } from '@/store/useAuthStore';
 // Helper to get base URL dynamically
 const getBaseURL = () => {
     if (typeof window !== 'undefined') {
-        // Use 127.0.0.1 instead of localhost for better compatibility on Windows
-        // But if we are accessing via an IP (like Tailscale), use that IP
+        // [v4.2 Revert] Use window.location.hostname to support remote access (Tailscale, etc.)
         const hostname = (window.location.hostname === 'localhost' || window.location.hostname === '0.0.0.0') 
             ? '127.0.0.1' 
             : window.location.hostname;
-        
-        // Ensure we always use 8002 for the backend during development
         return `http://${hostname}:8002/api/v1`;
     }
     // Fallback for SSR

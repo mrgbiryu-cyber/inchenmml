@@ -294,7 +294,8 @@ OPTIONAL CONTEXT (Existing Knowledge Graph Snapshot)
 - known_decisions: {json.dumps(context.get('known_decisions', []), ensure_ascii=False)}
 - known_tasks: {json.dumps(context.get('known_tasks', []), ensure_ascii=False)}
 
-EXTRACTION GOALS: Identify Decisions, Requirements, Concepts, Tasks, History, Facts. Map to nodes. Reuse IDs. Meaningful relationships. Warn on ambiguity/conflict."""
+            EXTRACTION GOALS: Identify Decisions, Requirements, Concepts, Tasks, History, Facts. Map to nodes. Reuse IDs. Meaningful relationships. Warn on ambiguity/conflict.
+            MANDATORY: Define at least one relationship (e.g. RELATED_TO, HAS_CONCEPT) between the extracted nodes."""
 
         try:
             response = await llm.ainvoke([
@@ -303,12 +304,27 @@ EXTRACTION GOALS: Identify Decisions, Requirements, Concepts, Tasks, History, Fa
             ])
             
             content = response.content.strip()
+            
+            # [Task: Extraction Quality Check] Log raw extraction JSON
+            print(f"DEBUG: [Extraction] Raw JSON from LLM (first 500 chars): {content[:500]}")
+            
             # Clean up potential markdown formatting
             if content.startswith("```"):
                 content = re.sub(r"^```[a-z]*\n", "", content)
                 content = re.sub(r"\n```$", "", content)
             
             data = json.loads(content)
+            
+            # [v5.0 CRITICAL] Log nodes and relationships count
+            node_count = len(data.get("nodes", []))
+            rel_count = len(data.get("relationships", []))
+            print(f"DEBUG: [Extraction] Extracted {node_count} nodes and {rel_count} relationships")
+            
+            # [Task: Extraction Quality Check] Warn if empty relationship list
+            if rel_count == 0 and node_count > 0:
+                print(f"WARNING: [Extraction] Nodes extracted but NO relationships found! LLM failed to follow prompt.")
+                print(f"DEBUG: [Extraction] Nodes: {[n.get('title', n.get('id')) for n in data.get('nodes', [])]}")
+
             usage = response.response_metadata.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0})
             return data, usage
         except Exception as e:
@@ -378,69 +394,130 @@ EXTRACTION GOALS: Identify Decisions, Requirements, Concepts, Tasks, History, Fa
         project_id = str(msg.project_id) if msg.project_id else "system-master"
         source_message_id = str(msg.message_id)
         
-        async with neo4j_client.driver.session() as session:
-            # 0. Ensure Project exists
-            await session.run("""
-                MERGE (p:Project {id: $project_id})
-                ON CREATE SET p.name = 'Auto-Created Project', p.timestamp = datetime()
-            """, {"project_id": project_id})
+        # [Task: Neo4j Node ID Trace] Verify Project ID matching
+        # Force normalize if needed (though project_id coming from DB should be UUID)
+        # We use str(msg.project_id) or "system-master"
+        
+        logger.info("AUDIT: _upsert_to_neo4j called", project_id=project_id, source_message_id=source_message_id)
 
-            # 1. Upsert Nodes
-            for node in extracted.get("nodes", []):
-                n_type = node.get("type", "Concept")
-                content_key = node.get("title") or node.get("name") or node.get("content", "")
-                if content_key:
-                    # 프로젝트 ID, 노드 타입, 컨텐츠를 조합해 해시 생성
-                    hash_input = f"{project_id}:{n_type}:{content_key}".encode('utf-8')
-                    content_hash = hashlib.sha256(hash_input).hexdigest()[:16]
-                    n_id = f"kg-{content_hash}"
-                else:
-                    n_id = node.get("id") or str(uuid.uuid4())
-                props = node.get("properties", {})
-                # Ensure core fields are present
-                props.update({
-                    "id": n_id,
-                    "project_id": project_id,
-                    "source_message_id": source_message_id,
-                    "created_at": node.get("created_at") or datetime.utcnow().isoformat()
-                })
-                # [KNOW-004] Boost cognitive status
-                if n_type in ['Concept', 'Requirement', 'Decision', 'Logic', 'Task']:
-                    props["is_cognitive"] = True
-                    
-                # Set title/name from props if not present in root (LLM might vary)
-                if "title" not in props and "title" in node: props["title"] = node["title"]
-                if "name" not in props and "name" in node: props["name"] = node["name"]
-                
-                await session.run(f"MERGE (n:{n_type} {{id: $n_id}}) SET n += $props", {"n_id": n_id, "props": props})
+        async with neo4j_client.driver.session() as session:
+            # [CRITICAL UPDATE v5.0] Force Transaction for ACID compliance
+            # Use write_transaction for atomic operations
             
-            # 2. Upsert Relationships
-            for rel in extracted.get("relationships", []):
-                rel_type = rel.get("type", "RELATES_TO").replace(" ", "_").upper()
-                from_id = rel.get("from_id") or rel.get("start_node_id")
-                to_id = rel.get("to_id") or rel.get("end_node_id")
+            async def _upsert_tx(tx, p_id, src_msg_id, nodes, rels):
+                # 0. Ensure Project exists
+                await tx.run("""
+                    MERGE (p:Project {id: $project_id})
+                    ON CREATE SET p.name = 'Auto-Created Project', p.timestamp = datetime()
+                """, {"project_id": p_id})
+
+                # 1. Upsert Nodes & Build ID Mapping
+                created_count = 0
+                node_id_map = {}  # [v5.0 CRITICAL] LLM ID -> Real Neo4j ID
                 
-                if not from_id or not to_id:
-                    continue
+                for node in nodes:
+                    llm_id = node.get("id")
+                    n_type = node.get("type", "Concept")
+                    content_key = node.get("title") or node.get("name") or node.get("content", "")
+                    if content_key:
+                        hash_input = f"{p_id}:{n_type}:{content_key}".encode('utf-8')
+                        content_hash = hashlib.sha256(hash_input).hexdigest()[:16]
+                        n_id = f"kg-{content_hash}"
+                        if llm_id:
+                            node_id_map[llm_id] = n_id
+                    else:
+                        n_id = node.get("id") or str(uuid.uuid4())
                     
-                await session.run(f"""
-                    MATCH (a {{id: $from_id}}), (b {{id: $to_id}})
-                    MERGE (a)-[r:{rel_type}]->(b)
-                    SET r.source_message_id = $source_message_id,
-                        r.project_id = $project_id
-                """, {
-                    "from_id": from_id, 
-                    "to_id": to_id, 
-                    "source_message_id": source_message_id,
-                    "project_id": project_id
-                })
-            
-            # 3. Connect to Project if not already connected
-            await session.run("""
-                MATCH (p:Project {id: $project_id}), (n {source_message_id: $source_message_id})
-                WHERE n <> p
-                MERGE (p)-[:HAS_KNOWLEDGE]->(n)
-            """, {"project_id": project_id, "source_message_id": source_message_id})
+                    props = node.get("properties", {})
+                    props.update({
+                        "id": n_id,
+                        "project_id": p_id,
+                        "source_message_id": src_msg_id,
+                        "created_at": node.get("created_at") or datetime.utcnow().isoformat()
+                    })
+                    
+                    if n_type in ['Concept', 'Requirement', 'Decision', 'Logic', 'Task']:
+                        props["is_cognitive"] = True
+                        
+                    # [Fix] Strict Title Fallback
+                    n_title = node.get("title") or node.get("name")
+                    if not n_title and node.get("content"):
+                         n_title = node.get("content")[:50] + "..."
+                    if not n_title:
+                         n_title = f"Untitled Node-{str(uuid.uuid4())[:8]}"
+                    
+                    if "title" not in props: props["title"] = n_title
+                    if "name" not in props: props["name"] = n_title
+                    
+                    await tx.run(f"MERGE (n:{n_type} {{id: $n_id}}) SET n += $props", {"n_id": n_id, "props": props})
+                    created_count += 1
+                
+                print(f"DEBUG: [Neo4j] Node ID mapping created: {len(node_id_map)} entries")
+                
+                # 2. Upsert Relationships
+                rel_count = 0
+                print(f"DEBUG: [Neo4j] Attempting to create {len(rels)} relationships")
+                for rel in rels:
+                    rel_type = rel.get("type", "RELATES_TO").replace(" ", "_").upper()
+                    # [v5.0 CRITICAL FIX] LLM uses various field names: source_id, target_id, source, target, from_id, to_id
+                    from_id_raw = (rel.get("source_id") or rel.get("from_id") or 
+                              rel.get("start_node_id") or rel.get("source"))
+                    to_id_raw = (rel.get("target_id") or rel.get("to_id") or 
+                            rel.get("end_node_id") or rel.get("target"))
+                    
+                    if not from_id_raw or not to_id_raw:
+                        print(f"WARNING: [Neo4j] Skipping relationship with missing IDs: {rel}")
+                        continue
+                    
+                    # [v5.0 CRITICAL] Map LLM IDs to real Neo4j IDs
+                    from_id = node_id_map.get(from_id_raw, from_id_raw)
+                    to_id = node_id_map.get(to_id_raw, to_id_raw)
+                    
+                    print(f"DEBUG: [Neo4j] Creating {rel_type}: {from_id[:8]}... -> {to_id[:8]}...")
+                    print(f"       [ID Mapping] {from_id_raw[:8]}... => {from_id[:8]}...")
+                        
+                    result = await tx.run(f"""
+                        MATCH (a {{id: $from_id}})
+                        WITH a
+                        MATCH (b {{id: $to_id}})
+                        MERGE (a)-[r:{rel_type}]->(b)
+                        SET r.source_message_id = $source_message_id,
+                            r.project_id = $project_id
+                        RETURN a.id as source, b.id as target
+                    """, {
+                        "from_id": from_id, 
+                        "to_id": to_id, 
+                        "source_message_id": src_msg_id,
+                        "project_id": p_id
+                    })
+                    
+                    created = await result.single()
+                    if created:
+                        print(f"       ✅ Relationship created successfully")
+                    else:
+                        print(f"       ❌ Failed - Nodes not found in DB!")
+                    rel_count += 1
+                
+                print(f"DEBUG: [Neo4j] Successfully created {rel_count} relationships")
+                
+                # 3. Connect to Project
+                await tx.run("""
+                    MATCH (p:Project {id: $project_id})
+                    WITH p
+                    MATCH (n {source_message_id: $source_message_id})
+                    WHERE n <> p
+                    MERGE (p)-[:HAS_KNOWLEDGE]->(n)
+                """, {"project_id": p_id, "source_message_id": src_msg_id})
+                
+                return created_count, rel_count
+
+            # Execute Transaction
+            try:
+                cnt_nodes, cnt_rels = await session.execute_write(_upsert_tx, project_id, source_message_id, extracted.get("nodes", []), extracted.get("relationships", []))
+                logger.info(f"[Neo4j] AUDIT: Transaction COMMITTED. Merged {cnt_nodes} nodes and {cnt_rels} relationships.", project_id=project_id)
+            except Exception as e:
+                logger.error(f"[Neo4j] AUDIT: Transaction FAILED: {e}")
+                raise e
         
         # 4. [신규] Vector DB에 임베딩 저장
         from app.services.embedding_service import embedding_service
@@ -472,7 +549,9 @@ EXTRACTION GOALS: Identify Decisions, Requirements, Concepts, Tasks, History, Fa
                         "metadata": {
                             "type": n_type,
                             "project_id": project_id,
-                            "title": node.get("title") or node.get("name", ""),
+                            "node_id": n_id,  # [v5.0 Critical] Neo4j ID for frontend navigation
+                            "title": node.get("title") or node.get("name") or (embed_text[:50] + "..." if embed_text else "Untitled"), # [v4.2 FIX] Fallback title
+                            "text": embed_text[:4000],  # [v4.2] Store original text (truncated)
                             "source": "knowledge",
                             "source_message_id": source_message_id,
                             "is_cognitive": n_type in ['Concept', 'Decision', 'Requirement', 'Logic', 'Task'],
@@ -596,15 +675,30 @@ CONTEXT:
         try:
             response = await llm.ainvoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
             content = response.content.strip()
+            
+            # [v5.0 DEBUG] Log raw extraction
+            print(f"DEBUG: [Batch Extraction] Raw JSON from LLM (first 500 chars): {content[:500]}")
+            
             if content.startswith("```"):
                 content = re.sub(r"^```[a-z]*\n", "", content)
                 content = re.sub(r"\n```$", "", content)
                 
             data = json.loads(content)
+            
+            # [v5.0 CRITICAL] Log extraction counts
+            node_count = len(data.get("nodes", []))
+            rel_count = len(data.get("relationships", []))
+            print(f"DEBUG: [Batch Extraction] Extracted {node_count} nodes and {rel_count} relationships")
+            
+            if rel_count == 0 and node_count > 0:
+                print(f"WARNING: [Batch Extraction] Nodes extracted but NO relationships found! LLM failed to follow prompt.")
+                print(f"DEBUG: [Batch Extraction] Nodes: {[n.get('title', n.get('id')) for n in data.get('nodes', [])]}")
+            
             usage = response.response_metadata.get("token_usage", {"prompt_tokens": 0, "completion_tokens": 0})
             return data, usage
         except Exception as e:
             logger.error("Batch extraction error", error=str(e))
+            print(f"ERROR: [Batch Extraction] Failed to parse LLM response: {e}")
             return None, {}
 
     async def _upsert_batch_to_neo4j(self, project_id: str, extracted: Dict[str, Any]):
@@ -633,25 +727,69 @@ CONTEXT:
                     props["is_cognitive"] = True
                 
                 # Set title/name from props if not present in root (LLM might vary)
-                if "title" not in props and "title" in node: props["title"] = node["title"]
-                if "name" not in props and "name" in node: props["name"] = node["name"]
+                # [Fix] Strict Title Fallback (Batch)
+                n_title = node.get("title") or node.get("name")
+                if not n_title and node.get("content"):
+                        n_title = node.get("content")[:50] + "..."
+                if not n_title:
+                        n_title = f"Untitled Node-{str(uuid.uuid4())[:8]}"
+
+                if "title" not in props: props["title"] = n_title
+                if "name" not in props: props["name"] = n_title
                     
                 await session.run(f"MERGE (n:{n_type} {{id: $n_id}}) SET n += $props", {"n_id": n_id, "props": props})
                 await session.run("MATCH (p:Project {id: $p_id}), (n {id: $n_id}) MERGE (p)-[:HAS_KNOWLEDGE]->(n)", {"p_id": p_id, "n_id": n_id})
 
-            for rel in extracted.get("relationships", []):
+            # [v5.0 CRITICAL] Build Node ID mapping (LLM ID -> Real Neo4j ID)
+            node_id_map = {}
+            for node in extracted.get("nodes", []):
+                llm_id = node.get("id")
+                n_type = node.get("type", "Concept")
+                content_key = node.get("title") or node.get("name") or node.get("content", "")
+                if content_key:
+                    hash_input = f"{project_id}:{n_type}:{content_key}".encode('utf-8')
+                    content_hash = hashlib.sha256(hash_input).hexdigest()[:16]
+                    real_id = f"kg-{content_hash}"
+                    if llm_id:
+                        node_id_map[llm_id] = real_id
+            
+            print(f"DEBUG: [Batch Neo4j] Node ID mapping created: {len(node_id_map)} entries")
+            
+            rels = extracted.get("relationships", [])
+            print(f"DEBUG: [Batch Neo4j] Attempting to create {len(rels)} relationships")
+            
+            for rel in rels:
                 rel_type = rel.get("type", "RELATES_TO").replace(" ", "_").upper()
-                from_id = rel.get("from_id") or rel.get("start_node_id")
-                to_id = rel.get("to_id") or rel.get("end_node_id")
+                # [v5.0 CRITICAL FIX] LLM uses various field names: source_id, target_id, source, target, from_id, to_id
+                from_id_raw = (rel.get("source_id") or rel.get("from_id") or 
+                          rel.get("start_node_id") or rel.get("source"))
+                to_id_raw = (rel.get("target_id") or rel.get("to_id") or 
+                        rel.get("end_node_id") or rel.get("target"))
                 
-                if not from_id or not to_id:
+                if not from_id_raw or not to_id_raw:
+                    print(f"WARNING: [Batch Neo4j] Skipping relationship with missing IDs: {rel}")
                     continue
+                
+                # [v5.0 CRITICAL] Map LLM IDs to real Neo4j IDs
+                from_id = node_id_map.get(from_id_raw, from_id_raw)
+                to_id = node_id_map.get(to_id_raw, to_id_raw)
+                
+                print(f"DEBUG: [Batch Neo4j] Creating {rel_type}: {from_id[:12]}... -> {to_id[:12]}...")
+                print(f"       [ID Mapping] {from_id_raw[:12]}... => {from_id[:12]}...")
                     
-                await session.run(f"""
+                # Verify nodes exist before creating relationship
+                result = await session.run(f"""
                     MATCH (a {{id: $from_id}}), (b {{id: $to_id}})
                     MERGE (a)-[r:{rel_type}]->(b)
                     SET r.project_id = $p_id
+                    RETURN a.id as source, b.id as target
                 """, {"from_id": from_id, "to_id": to_id, "p_id": p_id})
+                
+                created = await result.single()
+                if created:
+                    print(f"       ✅ Relationship created successfully")
+                else:
+                    print(f"       ❌ Failed - Nodes not found in DB!")
         
         # [신규] 배치 노드 임베딩 생성 및 Vector DB 저장
         from app.services.embedding_service import embedding_service
@@ -693,7 +831,9 @@ CONTEXT:
                                 "metadata": {
                                     "type": node.get("type", "Concept"),
                                     "project_id": p_id,
-                                    "title": node.get("title") or node.get("name", ""),
+                                    "node_id": n_id,  # [v5.0 Critical] Neo4j ID for frontend navigation
+                                    "title": node.get("title") or node.get("name") or (embed_texts[i][:50] + "..." if embed_texts[i] else "Untitled"), # [v4.2 FIX] Fallback title
+                                    "text": embed_texts[i][:4000],  # [v4.2] Store original text (truncated)
                                     "source": "knowledge",
                                     "is_cognitive": node.get("type") in ['Concept', 'Decision', 'Requirement', 'Logic', 'Task'],
                                     "created_at": datetime.utcnow().isoformat()
@@ -757,6 +897,13 @@ async def knowledge_worker():
                             if p_id not in pending_batch: pending_batch[p_id] = []
                             pending_batch[p_id].append(message_id)
                             last_activity[p_id] = datetime.utcnow()
+                            
+                            # [v5.0 DEBUG] Process immediately if batch size >= 2 (for faster testing)
+                            if len(pending_batch[p_id]) >= 2:
+                                m_ids = pending_batch.pop(p_id)
+                                del last_activity[p_id]
+                                logger.info("Batch size threshold reached, processing immediately", project_id=p_id, count=len(m_ids))
+                                await knowledge_service.process_batch_pipeline(p_id, m_ids)
                 
                 knowledge_queue.task_done()
             except asyncio.TimeoutError:

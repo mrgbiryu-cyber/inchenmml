@@ -12,6 +12,7 @@ function ChatContent() {
     const searchParams = useSearchParams();
     const [activeTab, setActiveTab] = useState('chat');
     const projectId = searchParams.get('projectId') || undefined;
+    const requestId = searchParams.get('request_id') || undefined; // [v4.2] Extract request_id
 
     useEffect(() => {
         const tab = searchParams.get('tab');
@@ -28,7 +29,7 @@ function ChatContent() {
             <div className="flex-1 overflow-hidden relative">
                 {/* GRAPH VIEW */}
                 <div className={`absolute inset-0 transition-opacity duration-300 ${activeTab === 'graph' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-                    <KnowledgeGraph projectId={projectId} />
+                    <KnowledgeGraph projectId={projectId} requestId={requestId} />
                 </div>
 
                 {/* LANGGRAPH VIEW */}
@@ -38,7 +39,7 @@ function ChatContent() {
 
                 {/* VECTOR MAP VIEW */}
                 <div className={`absolute inset-0 transition-opacity duration-300 ${activeTab === 'vector' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
-                    <VectorMapView />
+                    <VectorMapView requestId={requestId} projectId={projectId} />
                 </div>
 
                 {/* CHAT VIEW */}

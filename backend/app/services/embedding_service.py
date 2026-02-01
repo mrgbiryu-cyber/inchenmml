@@ -75,6 +75,8 @@ class EmbeddingService:
                 text_length=len(text),
                 vector_dim=len(embedding)
             )
+            logger.info("AUDIT: generate_embedding called", model=self.model, text_preview=text[:50])
+
             
             return embedding
             

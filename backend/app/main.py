@@ -106,6 +106,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-Id"],  # [v5.0] Expose custom headers to frontend
 )
 
 # Include routers
@@ -118,6 +119,9 @@ app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"]
 app.include_router(agents.router, prefix="/api/v1", tags=["agents"])
 app.include_router(orchestration.router, prefix="/api/v1/orchestration", tags=["orchestration"])
 app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
+
+from app.api.v1 import files
+app.include_router(files.router, prefix="/api/v1", tags=["files"])
 
 from app.api.v1 import master
 app.include_router(master.router, prefix="/api/v1/master", tags=["master"])

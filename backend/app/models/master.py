@@ -22,6 +22,17 @@ class MasterIntent(str, Enum):
     CANCEL = "CANCEL"
     TOPIC_SHIFT = "TOPIC_SHIFT"
 
+class ConversationMode(str, Enum):
+    """
+    [v4.0] Conversation Mode System
+    - NATURAL: 자유대화 (Blue)
+    - REQUIREMENT: 기획대화 (Green) - Auto Ingestion
+    - FUNCTION: 기능대화 (Purple) - Tool Execution
+    """
+    NATURAL = "NATURAL"
+    REQUIREMENT = "REQUIREMENT"
+    FUNCTION = "FUNCTION"
+
 # [v3.2] Shadow Mining - Draft Model
 class Draft(BaseModel):
     """
@@ -65,6 +76,7 @@ class ChatMessage(BaseModel):
     role: str = Field(..., description="user | assistant | system")
     content: str
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+    request_id: Optional[str] = None # [v4.2] Source Tracking ID
 
 class ChatRequest(BaseModel):
     """Request for sending a message to the master agent"""
@@ -73,8 +85,10 @@ class ChatRequest(BaseModel):
     project_id: Optional[str] = None
     thread_id: Optional[str] = None
     worker_status: Optional[Dict[str, Any]] = None # Frontend's worker status context
+    mode: ConversationMode = Field(default=ConversationMode.NATURAL, description="Current conversation mode")
 
 class ChatResponse(BaseModel):
     """Response from the master agent"""
     message: str
     quick_links: List[dict] = Field(default_factory=list, description="List of {label, url} for quick navigation")
+    mode: ConversationMode = Field(..., description="Updated conversation mode (Auto-switch result)")

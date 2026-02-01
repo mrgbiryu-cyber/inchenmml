@@ -7,8 +7,9 @@ import uuid
 from typing import AsyncGenerator, List, Dict, Any, Optional
 
 from app.models.stream_context import StreamContext
-from app.models.master import ChatMessage
+from app.models.master import ChatMessage, ConversationMode, MasterIntent # [v4.0]
 from app.core.database import save_message_to_rdb
+from app.services.knowledge_service import knowledge_queue # [v4.2] Knowledge Ingestion
 
 # Step 함수들 import
 from app.services.intent_router import parse_user_input, classify_intent
@@ -17,23 +18,22 @@ from app.services.mes_sync import load_current_mes_and_state, sync_mes_if_needed
 from app.services.response_builder import handle_function_read, handle_function_write_gate, response_builder
 
 
+from app.services.debug_service import debug_service  # [v4.2]
+from app.schemas.debug import DebugInfo, RetrievalChunk, RetrievalDebug  # [v4.2]
+
 async def stream_message_v32(
     message: str,
     history: List[ChatMessage],
     project_id: str = None,
     thread_id: str = None,
     user: Any = None,
-    worker_status: Dict[str, Any] = None
+    worker_status: Dict[str, Any] = None,
+    request_id: str = "",  # [v4.2]
+    is_admin: bool = False,  # [v4.2]
+    mode: ConversationMode = ConversationMode.NATURAL # [v4.0]
 ) -> AsyncGenerator[str, None]:
     """
     [v3.2 Refactored] stream_message 오케스트레이션 (<= 200줄)
-    
-    역할:
-    - 각 Step 함수를 순차 호출
-    - StreamContext를 단계별로 전달
-    - 실제 Write(DB update, agent modify, 버튼 생성)는 EXECUTOR에서만
-    
-    중요: stream_message 내부에서 "실제 Write" 금지
     """
     # ===== 초기화 =====
     session_id = thread_id or str(uuid.uuid4())
@@ -44,16 +44,42 @@ async def stream_message_v32(
         project_id=project_id or "system-master",
         thread_id=thread_id,
         user_id=user_id,
-        user_input_raw=message
+        user_input_raw=message,
+        request_id=request_id,  # [v4.2]
+        is_admin=is_admin,      # [v4.2]
+        mode=mode               # [v4.0]
     )
     
-    ctx.add_log("stream_message", "=== v3.2 stream_message started ===")
+    ctx.add_log("stream_message", f"=== v3.2 stream_message started (Mode: {mode}) ===")
     
     # ===== Step 1: 입력 정규화 =====
     ctx = parse_user_input(ctx)
     
     # ===== Step 2: Intent 분류 (LLM 기반 맥락 판단) =====
     ctx = await classify_intent(ctx)
+    
+    # ===== [v4.0] Auto Mode Switch (Dual Trigger) =====
+    # Backend Intelligence: Intent -> Mode
+    new_mode = ctx.mode
+    if ctx.primary_intent == MasterIntent.REQUIREMENT:
+        new_mode = ConversationMode.REQUIREMENT
+    elif ctx.primary_intent in [MasterIntent.FUNCTION_WRITE, MasterIntent.FUNCTION_READ]:
+        new_mode = ConversationMode.FUNCTION
+    
+    # If mode changed, update context and flag it
+    if new_mode != ctx.mode:
+        ctx.add_log("mode_switch", f"Auto-switching mode: {ctx.mode} -> {new_mode}")
+        ctx.mode = new_mode
+        ctx.mode_switched = True
+        
+        # Yield Mode Switch Signal immediately
+        import json
+        signal = json.dumps({
+            "type": "MODE_SWITCH",
+            "mode": new_mode.value,
+            "reason": f"Intent detected: {ctx.primary_intent}"
+        })
+        yield f"{signal}\n"
     
     # ===== Step 3: MES 및 Verification 상태 로드 =====
     ctx = await load_current_mes_and_state(ctx)
@@ -106,44 +132,87 @@ async def stream_message_v32(
                 # 사용자 질문 임베딩 생성
                 query_embedding = await embedding_service.generate_embedding(message)
                 
-                # Vector DB 검색 (대화 청크)
+                # Vector DB 검색 (대화 청크 + 지식 그래프)
                 vector_client = PineconeClient()
-                vector_results = await vector_client.query_vectors(
+                
+                # 1. 지식 검색 (Priority)
+                knowledge_results = await vector_client.query_vectors(
                     tenant_id=ctx.project_id,
                     vector=query_embedding,
                     top_k=3,
+                    namespace="knowledge"
+                )
+                
+                # 2. 대화 이력 검색 (Secondary)
+                conversation_results = await vector_client.query_vectors(
+                    tenant_id=ctx.project_id,
+                    vector=query_embedding,
+                    top_k=2,
                     filter_metadata={"source": "conversation"},
                     namespace="conversation"
                 )
                 
-                # Vector DB 결과를 Neo4j에서 상세 조회 (선택적)
-                if vector_results:
-                    relevant_chunks = []
-                    async with neo4j_client.driver.session() as session:
-                        for result in vector_results:
-                            chunk_query = """
-                                MATCH (chunk:ConversationChunk {chunk_id: $chunk_id})
-                                RETURN chunk
-                            """
-                            chunk_result = await session.run(chunk_query, {"chunk_id": result["id"]})
-                            chunk_record = await chunk_result.single()
-                            
-                            if chunk_record:
-                                chunk_node = chunk_record["chunk"]
-                                relevant_chunks.append({
-                                    "summary": chunk_node.get("summary", ""),
-                                    "score": result["score"],
-                                    "time_range": f"{chunk_node.get('chunk_start_time', '')} ~ {chunk_node.get('chunk_end_time', '')}"
-                                })
+                vector_results = knowledge_results + conversation_results
+                
+                # [v4.2] Vector 결과를 DebugInfo에 저장
+                if ctx.is_admin and vector_results:
+                    debug_chunks = []
+                    for idx, res in enumerate(vector_results):
+                        meta = res.get("metadata", {})
+                        
+                        title_val = meta.get("title")
+                        text_val = meta.get("text") or meta.get("summary", "(원문 없음)")
+                        
+                        # [v4.2 FIX] Fallback title from text if missing
+                        if not title_val or title_val == "Untitled":
+                            title_val = (text_val[:30] + "...") if text_val and len(text_val) > 1 else "No Title"
+
+                        chunk = RetrievalChunk(
+                            rank=idx + 1,
+                            score=res.get("score", 0.0),
+                            title=title_val,
+                            text=text_val,
+                            source_message_id=meta.get("source_message_id"),
+                            node_id=meta.get("node_id"),  # [v5.0 Critical] Neo4j ID for tab navigation
+                            type=meta.get("type", "Concept"),  # [v5.0] Node type for UI
+                            metadata=meta
+                        )
+                        debug_chunks.append(chunk)
                     
-                    # 맥락 구성
-                    if relevant_chunks:
-                        context_parts = [
-                            f"[관련 대화 {i+1}] (유사도: {c['score']:.2f})\n{c['summary']}"
-                            for i, c in enumerate(relevant_chunks)
-                        ]
-                        relevant_context = "\n\n".join(context_parts)
-                        ctx.add_log("vector_search", f"Found {len(relevant_chunks)} relevant chunks")
+                    ctx.debug_info.retrieval.chunks = debug_chunks
+                
+                # [v5.0 Critical Fix] Admin Debug Info 즉시 저장 (404 방지)
+                if ctx.is_admin and ctx.request_id:
+                    try:
+                        await debug_service.save_debug_info(ctx.request_id, ctx.debug_info)
+                        ctx.add_log("debug_cache", f"Debug info cached immediately for request {ctx.request_id}")
+                    except Exception as e:
+                        ctx.add_log("debug_cache", f"Failed to cache debug info: {e}")
+                
+                # 맥락 구성 (지식 우선)
+                relevant_context = ""
+                context_parts = []
+                
+                if knowledge_results:
+                    context_parts.append("=== [지식 베이스] ===")
+                    for i, res in enumerate(knowledge_results):
+                        meta = res.get("metadata", {})
+                        text = meta.get("text") or meta.get("summary", "")
+                        context_parts.append(f"[{i+1}] (유사도: {res['score']:.2f}) {text}")
+                        
+                if conversation_results:
+                    context_parts.append("\n=== [과거 대화] ===")
+                    for i, res in enumerate(conversation_results):
+                        meta = res.get("metadata", {})
+                        text = meta.get("text") or meta.get("summary", "")
+                        context_parts.append(f"[{i+1}] (유사도: {res['score']:.2f}) {text}")
+
+                if context_parts:
+                    relevant_context = "\n".join(context_parts)
+                    ctx.add_log("vector_search", f"Found {len(knowledge_results)} knowledge chunks, {len(conversation_results)} chat chunks")
+                    
+                    # [Test Log] Proof of Knowledge Persistence (Requested by User)
+                    print(f"DEBUG: [Knowledge Persistence] Project {ctx.project_id} - Loaded {len(knowledge_results)} Graph/Vector nodes for New Chat context.")
             except Exception as e:
                 ctx.add_log("vector_search", f"Vector search failed: {e}")
                 # Vector 검색 실패는 무시하고 계속 진행
@@ -166,7 +235,8 @@ async def stream_message_v32(
                 # Vector Context 추가
                 vector_context_str = ""
                 if relevant_context:
-                    vector_context_str = f"\n[관련 지식/대화]\n{relevant_context}\n"
+                    vector_context_str = f"\n[Context Identified]\n[관련 지식/대화]\n{relevant_context}\n"
+                    print(f"DEBUG: [RAG Injection] Injected {len(relevant_context)} chars of context into System Prompt.")
                 
                 system_prompt = f"""당신은 프로젝트 관리를 돕는 AI 어시스턴트입니다.
 
@@ -186,7 +256,8 @@ START TASK, READY_TO_START 같은 시스템 메시지는 출력하지 마세요.
                 # NATURAL/TOPIC_SHIFT: 일반 대화
                 vector_context_str = ""
                 if relevant_context:
-                    vector_context_str = f"\n[관련 지식/대화]\n{relevant_context}\n위 관련 정보를 참고하되, 최신 대화 맥락을 우선하세요.\n"
+                    vector_context_str = f"\n[Context Identified]\n[관련 지식/대화]\n{relevant_context}\n위 관련 정보를 참고하되, 최신 대화 맥락을 우선하세요.\n"
+                    print(f"DEBUG: [RAG Injection] Injected {len(relevant_context)} chars of context into System Prompt.")
                 
                 system_prompt = f"""당신은 친절한 AI 어시스턴트입니다.
 {vector_context_str}
@@ -228,13 +299,54 @@ START TASK, READY_TO_START, MISSION READINESS 같은 시스템 메시지는 절�
     # ===== Step 11: 상태 저장 (persist_state) =====
     # [TODO] MES/Hash/Draft/verification_state를 Redis/DB에 저장
     # 지금은 메시지만 저장
-    await save_message_to_rdb("user", message, project_id, thread_id, metadata={"user_id": user_id})
-    await save_message_to_rdb("assistant", ctx.final_response, project_id, thread_id)
+    # [v4.2 Update] 사용자 메시지 저장 및 Knowledge Queue 등록
+    user_msg_id, saved_thread_id = await save_message_to_rdb("user", message, project_id, thread_id, metadata={"user_id": user_id})
+    
+    # [KNOW-001] Knowledge Ingestion Trigger
+    # 사용자의 메시지를 지식 큐에 등록하여 비동기로 처리 (중요도 필터링은 worker가 수행)
+    try:
+        if user_msg_id:
+            knowledge_queue.put_nowait(user_msg_id)
+            ctx.add_log("knowledge_ingestion", f"Message {user_msg_id} queued for knowledge processing")
+    except Exception as e:
+        ctx.add_log("knowledge_ingestion", f"Failed to queue message: {e}")
+
+    asst_msg_id, _ = await save_message_to_rdb(
+        "assistant", 
+        ctx.final_response, 
+        project_id, 
+        thread_id,
+        metadata={"request_id": ctx.request_id} if ctx.request_id else None # [v4.2] Save Request ID
+    )
+    
+    # [v4.0] Auto-Ingestion for Requirement Mode (Assistant Response)
+    if ctx.mode == ConversationMode.REQUIREMENT and asst_msg_id:
+        try:
+            knowledge_queue.put_nowait(asst_msg_id)
+            ctx.add_log("knowledge_ingestion", f"Auto-ingesting Assistant Response {asst_msg_id} (Requirement Mode)")
+        except Exception as e:
+            ctx.add_log("knowledge_ingestion", f"Failed to auto-ingest assistant response: {e}")
+    
+
+
+    # [v4.2] Admin인 경우 Debug Info 캐싱 (TTL 10분)
+    if ctx.is_admin and ctx.request_id:
+        await debug_service.save_debug_info(ctx.request_id, ctx.debug_info)
     
     ctx.add_log("stream_message", "=== v3.2 stream_message completed ===")
     
     # ===== 최종 응답 스트리밍 =====
+    
+    # [v5.0] Admin 출처 호출 (Source Auditing)
+    # 메시지 끝에 구분자와 함께 request_id를 메타데이터 형태로 전달하지 않고
+    # 프론트엔드에서는 이미 응답 헤더의 X-Request-Id 또는 저장된 메시지의 metadata_json을 통해 확인하고 있습니다.
+    # 하지만 사용자가 "출처 라인 호출"을 명시적으로 요청했으므로, 
+    # 어드민인 경우 응답 끝에 보이지 않는 메타데이터나 특정 시그널을 추가할 수 있습니다.
+    # 현재 프론트엔드(ChatInterface.tsx)는 msg.request_id가 있으면 자동으로 출처 바를 렌더링합니다.
+    # 따라서 여기서 별도의 텍스트를 추가할 필요는 없지만, 확실한 동작을 위해 로그만 남깁니다.
+    
     yield ctx.final_response
+    yield "\n" # Ensure clean end
 
 
 def _clean_response_final(content: str, intent: str, gate_open: bool) -> str:

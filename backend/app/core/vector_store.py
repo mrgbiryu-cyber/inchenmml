@@ -64,9 +64,28 @@ class PineconeClient:
             return []
 
         # Construct filter
+        # [Task: Vector Filter Debug] In BUJA v5.0, we use 'project_id' as the isolation key for knowledge,
+        # but 'tenant_id' argument name is used here. We need to be careful.
+        # If the caller passes project_id as tenant_id, then we are filtering by tenant_id field in Pinecone.
+        # HOWEVER, in knowledge_service.py: upsert_vectors(tenant_id=project_id, ...)
+        # And inside upsert_vectors: vec["metadata"]["tenant_id"] = tenant_id (which is project_id)
+        # So 'tenant_id' field in Pinecone metadata actually holds 'project_id' value for knowledge vectors.
+        # BUT, knowledge_service.py also sets vec["metadata"]["project_id"] = project_id explicitly.
+        
+        # Let's verify what we are filtering on.
         query_filter = {"tenant_id": tenant_id}
         if filter_metadata:
             query_filter.update(filter_metadata)
+            
+        # [Task: Vector Filter Debug] Log the exact filter
+        import structlog
+        logger = structlog.get_logger(__name__)
+        logger.info(f"AUDIT: query_vectors called", filter=query_filter, namespace=namespace, top_k=top_k)
+        
+        # [Verification] Check for key consistency
+        if 'project_id' in query_filter and 'tenant_id' in query_filter:
+             if query_filter['project_id'] != query_filter['tenant_id']:
+                 logger.warning("AUDIT: Mismatch between project_id and tenant_id in filter", project_id=query_filter.get('project_id'), tenant_id=query_filter.get('tenant_id'))
 
         results = self.index.query(
             vector=vector,
@@ -75,6 +94,8 @@ class PineconeClient:
             include_metadata=True,
             namespace=namespace
         )
+        
+        # structlog.get_logger(__name__).debug(f"[Vector Debug] Found {len(results.matches)} matches.")
 
         return [
             {

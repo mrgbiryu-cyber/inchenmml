@@ -181,16 +181,45 @@ class Neo4jClient:
         async with self.driver.session() as session:
             await session.run(query, {"project_id": project_id})
 
-    async def list_projects(self, tenant_id: str) -> List[Dict[str, Any]]:
+    async def list_projects(self, tenant_id: str, user_id: str = None, project_ids: List[str] = None) -> List[Dict[str, Any]]:
         if not self.driver:
             return []
-        query = """
-        MATCH (p:Project {tenant_id: $tenant_id})
-        RETURN p
-        ORDER BY p.updated_at DESC
-        """
+        
+        # [v5.0] RBAC: 
+        # 1. user_id provided: Filter by creator (Legacy/Creator mode)
+        # 2. project_ids provided: Filter by specific IDs (Assigned mode)
+        # 3. Neither: Return all in tenant (Admin mode)
+        
+        params = {"tenant_id": tenant_id}
+        
+        if project_ids is not None:
+            # Filter by explicit list of IDs (UserProjectModel mapping)
+            query = """
+            MATCH (p:Project {tenant_id: $tenant_id})
+            WHERE p.id IN $project_ids
+            RETURN p
+            ORDER BY p.updated_at DESC
+            """
+            params["project_ids"] = project_ids
+        elif user_id:
+            # Filter by creator only
+            query = """
+            MATCH (p:Project {tenant_id: $tenant_id})
+            WHERE p.user_id = $user_id
+            RETURN p
+            ORDER BY p.updated_at DESC
+            """
+            params["user_id"] = user_id
+        else:
+            # All projects (Admin)
+            query = """
+            MATCH (p:Project {tenant_id: $tenant_id})
+            RETURN p
+            ORDER BY p.updated_at DESC
+            """
+            
         async with self.driver.session() as session:
-            result = await session.run(query, {"tenant_id": tenant_id})
+            result = await session.run(query, params)
             projects = []
             async for record in result:
                 project_data = self._convert_neo4j_types(dict(record["p"]))
@@ -304,23 +333,47 @@ class Neo4jClient:
 
     async def get_knowledge_graph(self, project_id: str) -> Dict[str, Any]:
         if not self.driver: return {"nodes": [], "links": []}
+        
+        # [CRITICAL FIX] Print debug with exact project_id
+        print(f"DEBUG: [Neo4j] get_knowledge_graph called for project: '{project_id}' (type: {type(project_id)})")
+        
+        # [v5.0 CRITICAL FIX] Optimized query - Separate nodes and relationships
+        # Step 1: Get all knowledge nodes for this project
+        # Step 2: Get all relationships between those nodes
         query = """
+        // Collect all knowledge nodes for this project
         MATCH (n)
         WHERE (n.project_id = $project_id OR (:Project {id: $project_id})-[:HAS_KNOWLEDGE]->(n))
           AND labels(n)[0] IN ['Concept', 'Requirement', 'Decision', 'Logic', 'Fact', 'Task', 'File', 'History']
+        WITH collect(DISTINCT n) as knowledge_nodes, collect(DISTINCT n.id) as node_ids
+        
+        // Now find all relationships between these nodes
+        UNWIND knowledge_nodes as n
         OPTIONAL MATCH (n)-[r]->(m)
-        WHERE labels(m)[0] IN ['Concept', 'Requirement', 'Decision', 'Logic', 'Fact', 'Task', 'File', 'History']
-          AND (m.project_id = $project_id OR (:Project {id: $project_id})-[:HAS_KNOWLEDGE]->(m))
-        RETURN n, labels(n) as labels, collect({type: type(r), target: m.id}) as rels
+        WHERE m.id IN node_ids
+          AND labels(m)[0] IN ['Concept', 'Requirement', 'Decision', 'Logic', 'Fact', 'Task', 'File', 'History']
+        
+        RETURN n, labels(n) as labels, 
+               collect(DISTINCT {type: type(r), target: m.id, source: n.id}) as rels
         """
+        
         nodes, links, node_ids = [], [], set()
+        
         async with self.driver.session() as session:
+            # [CRITICAL FIX] Log before query execution
+            print(f"DEBUG: [Neo4j] Executing Cypher query with project_id: '{project_id}'")
+            
             result = await session.run(query, {"project_id": project_id})
+            
+            record_count = 0
+            link_count = 0
             async for record in result:
+                record_count += 1
                 n = record["n"]
                 raw_id = n.get("id") or n.element_id
                 n_id = str(raw_id[0]) if isinstance(raw_id, list) else str(raw_id)
                 labels = record["labels"]
+                
                 if n_id not in node_ids:
                     color, val = "#3b82f6", 10
                     main_label = labels[0] if labels else "Concept"
@@ -330,13 +383,117 @@ class Neo4jClient:
                     elif main_label == "Concept": color, val = "#8b5cf6", 12
                     elif main_label == "Fact": color, val = "#06b6d4", 8
                     elif main_label == "Task": color, val = "#f97316", 10
-                    nodes.append({"id": n_id, "name": n.get("title") or n.get("name") or n.get("summary") or n_id, "type": main_label, "val": val, "color": color, "properties": dict(n)})
+                    
+                    # [v4.2 FIX] Use content/claim as fallback for name if title is missing
+                    display_name = n.get("title") or n.get("name") or n.get("summary")
+                    if not display_name:
+                        content_val = n.get("content") or n.get("claim") or n.get("text")
+                        if content_val:
+                            display_name = (content_val[:30] + "...") if len(content_val) > 30 else content_val
+                    
+                    # [CRITICAL FIX] Log node's project_id for verification
+                    node_project_id = n.get("project_id", "NONE")
+                    if record_count <= 3:  # Only log first 3 nodes
+                        print(f"DEBUG: [Neo4j] Node {n_id} has project_id: '{node_project_id}' (expected: '{project_id}')")
+                    
+                    # [v5.0 FIX] Flatten critical properties for Frontend Interface (GraphNode)
+                    node_props = dict(n)
+                    nodes.append({
+                        "id": n_id, 
+                        "name": display_name or n_id, 
+                        "title": n.get("title"),
+                        "content": n.get("content"),
+                        "source_message_id": n.get("source_message_id"),
+                        "type": main_label, 
+                        "val": val, 
+                        "color": color, 
+                        "properties": node_props
+                    })
                     node_ids.add(n_id)
-                for rel in record["rels"]:
+                
+                # [CRITICAL FIX] Process relationships correctly
+                rels = record["rels"]
+                for rel in rels:
+                    if not rel or not rel.get("target") or not rel.get("source"):
+                        continue
+                    
+                    source_id = rel.get("source")
                     target_id = rel.get("target")
-                    if target_id:
-                        t_id = str(target_id[0]) if isinstance(target_id, list) else str(target_id)
-                        if t_id: links.append({"source": n_id, "target": t_id, "label": rel["type"]})
+                    rel_type = rel.get("type")
+                    
+                    if not rel_type:
+                        continue
+                    
+                    # Normalize IDs
+                    s_id = str(source_id[0]) if isinstance(source_id, list) else str(source_id)
+                    t_id = str(target_id[0]) if isinstance(target_id, list) else str(target_id)
+                    
+                    if s_id and t_id and s_id != t_id:
+                        link_obj = {
+                            "source": s_id, 
+                            "target": t_id, 
+                            "type": rel_type  # [v5.0 FIX] Use 'type' not 'label' for frontend compatibility
+                        }
+                        # Avoid duplicate links
+                        if link_obj not in links:
+                            links.append(link_obj)
+                            if len(links) <= 3:  # Log first 3 links
+                                print(f"DEBUG: [Neo4j] Link added: {s_id[:12]}... -{rel_type}-> {t_id[:12]}...")
+        
+        # [CRITICAL FIX] Print final result summary
+        print(f"DEBUG: [Neo4j] Query processed {record_count} records")
+        print(f"DEBUG: [Neo4j] Returning {len(nodes)} nodes and {len(links)} links for project '{project_id}'")
+        
+        # [v5.0 FIX] Check raw DB in a new session to avoid "Session closed" error
+        if len(links) == 0 and len(nodes) > 0:
+            print(f"WARNING: [Neo4j] {len(nodes)} nodes exist but 0 relationships found!")
+            print(f"WARNING: [Neo4j] Checking raw DB for relationships with project_id '{project_id}'...")
+            try:
+                # Open a NEW session for the raw DB check
+                async with self.driver.session() as check_session:
+                    # [v5.0 CRITICAL] Check ALL relationship types, grouped
+                    check_query = """
+                    MATCH (n)-[r]->(m)
+                    WHERE (n.project_id = $project_id OR m.project_id = $project_id OR r.project_id = $project_id)
+                    RETURN type(r) as rel_type, count(*) as count
+                    ORDER BY count DESC
+                    """
+                    check_result = await check_session.run(check_query, {"project_id": project_id})
+                    rel_types = []
+                    total_rels = 0
+                    async for check_record in check_result:
+                        rel_type = check_record["rel_type"]
+                        count = check_record["count"]
+                        rel_types.append(f"{rel_type}: {count}")
+                        total_rels += count
+                    
+                    if rel_types:
+                        print(f"WARNING: [Neo4j] Found {total_rels} raw relationships in DB but query returned 0!")
+                        print(f"         Relationship types: {', '.join(rel_types)}")
+                        
+                        # [v5.0] Sample actual knowledge node relationships
+                        sample_query = """
+                        MATCH (n)-[r]->(m)
+                        WHERE n.project_id = $project_id AND m.project_id = $project_id
+                          AND labels(n)[0] IN ['Concept', 'Requirement', 'Decision', 'Logic', 'Fact', 'Task', 'File', 'History']
+                          AND labels(m)[0] IN ['Concept', 'Requirement', 'Decision', 'Logic', 'Fact', 'Task', 'File', 'History']
+                        RETURN type(r) as rel_type, n.id as source_id, m.id as target_id
+                        LIMIT 5
+                        """
+                        sample_result = await check_session.run(sample_query, {"project_id": project_id})
+                        samples = []
+                        async for sample_record in sample_result:
+                            samples.append(dict(sample_record))
+                        
+                        if samples:
+                            print(f"         Sample knowledge-to-knowledge relationships:")
+                            for i, rel in enumerate(samples):
+                                print(f"           {i+1}. {rel['source_id'][:12]}... -{rel['rel_type']}-> {rel['target_id'][:12]}...")
+                    else:
+                        print(f"WARNING: [Neo4j] No relationships found in raw DB either. They may not have been created.")
+            except Exception as check_err:
+                print(f"ERROR: [Neo4j] Failed to check raw relationships: {check_err}")
+        
         return {"nodes": nodes, "links": links}
 
     async def create_indexes(self):

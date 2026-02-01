@@ -60,30 +60,30 @@ async def get_current_user(
             detail="Invalid role in token",
         )
     
-    # Fetch user from mock DB to get full details (quota, allowed_domains)
-    from app.api.v1.auth import MOCK_USERS_DB
+    # Fetch user from Real DB
+    from app.core.database import AsyncSessionLocal, UserModel
+    from sqlalchemy import select
     
-    # Try to find user by ID (which is stored as 'id' in MOCK_USERS_DB values)
-    # Note: MOCK_USERS_DB keys are usernames, values are dicts
-    user_data = None
-    for u in MOCK_USERS_DB.values():
-        if u["id"] == user_id:
-            user_data = u
-            break
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(UserModel).where(UserModel.id == user_id))
+        user_model = result.scalar_one_or_none()
             
-    if not user_data:
-        # Fallback if not found in DB (shouldn't happen if token is valid)
-        # Construct minimal user object
-        user = User(
-            id=user_id,
-            username=user_id,
-            tenant_id=tenant_id,
-            role=role,
-            is_active=True
+    if not user_model:
+        # Fallback (shouldn't happen if token is valid)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     else:
         # Create User object from DB data
-        user = User(**user_data)
+        user = User(
+            id=user_model.id,
+            username=user_model.username,
+            tenant_id=user_model.tenant_id,
+            role=UserRole(user_model.role),
+            is_active=bool(user_model.is_active)
+        )
     
     return user
 

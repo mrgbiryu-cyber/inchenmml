@@ -6,13 +6,15 @@ import sys
 if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse, JSONResponse
 from app.models.master import MasterAgentConfig, ChatRequest, ChatResponse, ChatMessage
 from app.services.master_agent_service import MasterAgentService
-from app.services.v32_stream_message_refactored import stream_message_v32  # [v3.2] 추가
+from app.services.v32_stream_message_refactored import stream_message_v32
 from app.api.dependencies import get_current_user
 from app.models.schemas import User
+from app.services.debug_service import debug_service # [v4.2]
+import uuid # [v4.2]
 
 router = APIRouter()
 service = MasterAgentService()
@@ -59,7 +61,12 @@ async def chat_stream(
 ):
     """
     [v3.2] Streaming chat with v3.2 Intent Router and Guardrails.
+    [v4.2] Added X-Request-Id header and Admin Debug Logic.
     """
+    # [v4.2] 1. Request ID 생성 및 Admin 체크
+    request_id = str(uuid.uuid4())
+    is_admin = (current_user.role == "super_admin")
+    
     async def event_generator():
         try:
             # [v3.2 FIX] stream_message_v32 사용 (리팩토링된 버전)
@@ -69,7 +76,10 @@ async def chat_stream(
                 request.project_id, 
                 request.thread_id,
                 user=current_user,
-                worker_status=request.worker_status
+                worker_status=request.worker_status,
+                request_id=request_id,  # [v4.2]
+                is_admin=is_admin,      # [v4.2]
+                mode=request.mode       # [v4.0]
             ):
                 # Send as simple text chunks or JSON if needed. 
                 # For basic streaming, we send raw text.
@@ -77,7 +87,44 @@ async def chat_stream(
         except Exception as e:
             yield f"\n[Error]: {str(e)}"
 
-    return StreamingResponse(event_generator(), media_type="text/plain")
+    # [v4.2] 2. X-Request-Id 헤더 설정
+    headers = {
+        "X-Request-Id": request_id,
+        "Access-Control-Expose-Headers": "X-Request-Id"
+    }
+    
+    return StreamingResponse(event_generator(), media_type="text/plain", headers=headers)
+
+@router.get("/chat_debug")
+async def get_chat_debug(
+    request_id: str = Query(..., description="Target Request UUID"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    [v4.2] Admin-only Debug Info Retrieval endpoint.
+    """
+    # 1. Admin 권한 체크 (서버 사이드)
+    if current_user.role != "super_admin":
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+    
+    # 2. Debug Info 조회
+    debug_info = await debug_service.get_debug_info(request_id)
+    
+    # 3. 결과 반환
+    if not debug_info:
+        raise HTTPException(status_code=404, detail="Debug info not found or expired")
+    
+    # [v5.0 DEBUG] Log first chunk's node_id
+    debug_dict = debug_info.model_dump()
+    chunks = debug_dict.get("retrieval", {}).get("chunks", [])
+    if chunks:
+        first_chunk = chunks[0]
+        print(f"DEBUG: [chat_debug API] First chunk node_id: {first_chunk.get('node_id', 'MISSING')}, title: {first_chunk.get('title', 'N/A')[:30]}")
+    
+    return {
+        "request_id": request_id,
+        "debug_info": debug_dict
+    }
 
 @router.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):

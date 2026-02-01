@@ -11,10 +11,11 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from datetime import datetime
 import uuid
 
-from app.models.schemas import Project, ProjectAgentConfig, User, AgentDefinition, ProjectCreate, ChatMessageResponse
+from app.models.schemas import Project, ProjectAgentConfig, User, AgentDefinition, ProjectCreate, ChatMessageResponse, UserRole
 from app.api.dependencies import get_current_user
 from app.core.neo4j_client import neo4j_client
-from app.core.database import get_messages_from_rdb
+from app.core.database import get_messages_from_rdb, MessageModel, AsyncSessionLocal
+from app.services.knowledge_service import knowledge_queue
 
 router = APIRouter()
 
@@ -30,7 +31,7 @@ async def _get_project_or_recover(project_id: str, current_user: User) -> dict:
     )
 
     if is_broken_system:
-        print(f"DEBUG: system-master is missing or broken. Force-recovering for user {current_user.id}")
+        # structlog.get_logger(__name__).info(f"System-master missing/broken. Force-recovering for user {current_user.id}")
         now = datetime.utcnow()
         from app.core.config import settings
         
@@ -166,10 +167,54 @@ async def create_project(
                 )
             ]
         )
-        print(f"DEBUG: Injected unique default agents for project {project_id}")
+        # structlog.get_logger(__name__).info(f"Injected unique default agents for project {project_id}")
     
     # Save to Neo4j
     await neo4j_client.create_project_graph(new_project)
+    
+    # [Task 1.1] Create Default Thread (Room)
+    try:
+        from app.core.database import AsyncSessionLocal, ThreadModel, _normalize_project_id
+        async with AsyncSessionLocal() as session:
+            default_thread_id = f"thread-{uuid.uuid4()}"
+            default_thread = ThreadModel(
+                id=default_thread_id,
+                project_id=_normalize_project_id(project_id),
+                title="기본 대화방"
+            )
+            session.add(default_thread)
+            await session.commit()
+            # structlog.get_logger(__name__).info(f"Default thread created for project {project_id}: {default_thread_id}")
+    except Exception as e:
+        # structlog.get_logger(__name__).error(f"Failed to create default thread: {e}")
+        pass
+
+    # [Seed Knowledge] Auto-ingest project description
+    if project_in.description and len(project_in.description) > 10:
+        try:
+            msg_id = str(uuid.uuid4())
+            content_seed = f"[Project Seed] Description: {project_in.description}"
+            
+            async with AsyncSessionLocal() as session:
+                msg = MessageModel(
+                    message_id=msg_id,
+                    project_id=uuid.UUID(project_id),
+                    sender_role="user",
+                    content=content_seed,
+                    timestamp=now,
+                    metadata_json={
+                        "type": "seed_knowledge",
+                        "user_id": current_user.id
+                    }
+                )
+                session.add(msg)
+                await session.commit()
+            
+            knowledge_queue.put_nowait(msg_id)
+            # structlog.get_logger(__name__).info(f"Seed knowledge queued for project {project_id}")
+        except Exception as e:
+            # structlog.get_logger(__name__).warning(f"Failed to ingest seed knowledge: {e}")
+            pass
     
     return new_project
 
@@ -177,9 +222,35 @@ async def create_project(
 async def list_projects(
     current_user: User = Depends(get_current_user)
 ):
-    """List all projects for the current user's tenant"""
-    # Filter by tenant_id in Neo4j
-    projects_data = await neo4j_client.list_projects(current_user.tenant_id)
+    """
+    List projects.
+    - Super Admin: All projects in tenant
+    - Standard User: Projects assigned in user_projects table
+    """
+    from app.core.database import AsyncSessionLocal, UserProjectModel
+    from sqlalchemy import select
+
+    # If standard user, get assigned project IDs from RDB
+    assigned_project_ids = None
+    
+    if current_user.role == UserRole.STANDARD_USER:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(UserProjectModel.project_id).where(UserProjectModel.user_id == current_user.id)
+            )
+            assigned_project_ids = result.scalars().all()
+            
+        # If no projects assigned, return empty list immediately
+        if not assigned_project_ids:
+            return []
+
+    # Query Neo4j with filter
+    # If assigned_project_ids is None, it means Super Admin (fetch all)
+    # If assigned_project_ids is a list, fetch only those
+    projects_data = await neo4j_client.list_projects(
+        current_user.tenant_id, 
+        project_ids=assigned_project_ids
+    )
     return [Project(**p) for p in projects_data]
 
 @router.get("/{project_id}", response_model=Project)
@@ -229,7 +300,10 @@ async def save_agent_config(
     config: ProjectAgentConfig,
     current_user: User = Depends(get_current_user)
 ):
-    """Save agent configuration for a project"""
+    """Save agent configuration for a project (Admin Only)"""
+    if current_user.role == UserRole.STANDARD_USER:
+        raise HTTPException(status_code=403, detail="Standard users cannot modify agent configuration")
+        
     project_data = await _get_project_or_recover(project_id, current_user)
         
     project_data["agent_config"] = config
@@ -246,7 +320,7 @@ async def get_agent_config(
     current_user: User = Depends(get_current_user)
 ):
     """Get agent configuration for a project"""
-    print(f"DEBUG: GET Agent Config for Project: {project_id}")
+    # structlog.get_logger(__name__).debug(f"GET Agent Config for Project: {project_id}")
     
     project_data = await _get_project_or_recover(project_id, current_user)
         
@@ -288,18 +362,18 @@ async def execute_project(
     """
     Start project execution workflow
     """
-    print(f"DEBUG: Starting execution for Project: {project_id}")
+    # structlog.get_logger(__name__).info(f"Starting execution for Project: {project_id}")
     try:
         project_data = await _get_project_or_recover(project_id, current_user)
         project = Project(**project_data)
         
         # [Defensive] Inject repo_path for system-master if missing
         if project_id == "system-master" and (not project.repo_path or project.repo_path == ""):
-            print(f"DEBUG: Injecting default repo_path for {project_id}")
+            # structlog.get_logger(__name__).debug(f"Injecting default repo_path for {project_id}")
             project.repo_path = "D:/project/myllm"
         
         if not project.agent_config:
-            print(f"DEBUG: Project {project_id} has no agent config")
+            # structlog.get_logger(__name__).error(f"Project {project_id} has no agent config")
             raise HTTPException(status_code=400, detail="Project has no agent configuration")
 
         # Initialize Orchestrator
@@ -311,14 +385,21 @@ async def execute_project(
         
         # Start execution
         execution_id = await orchestrator.execute_workflow(project, current_user)
-        print(f"DEBUG: Workflow started for {project_id}. ID: {execution_id}")
+        
+        import structlog
+        structlog.get_logger(__name__).info(
+            "Workflow execution started",
+            project_id=project_id,
+            user_id=current_user.id,
+            execution_id=execution_id
+        )
         return {"message": "Workflow started", "execution_id": execution_id}
     except HTTPException:
         # Re-raise HTTP exceptions as they are
         raise
     except Exception as e:
         import traceback
-        print(f"ERROR: Execution failed for {project_id}: {str(e)}")
+        # structlog.get_logger(__name__).error(f"Execution failed for {project_id}: {str(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -354,6 +435,120 @@ async def test_agents(
     
     return results
 
+@router.post("/{project_id}/threads", status_code=status.HTTP_201_CREATED)
+async def create_project_thread(
+    project_id: str,
+    payload: dict, # {title: str}
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new chat thread (Room) for a project"""
+    title = payload.get("title", "New Chat")
+    
+    # RBAC check
+    await _get_project_or_recover(project_id, current_user)
+    
+    from app.core.database import AsyncSessionLocal, ThreadModel, _normalize_project_id
+    
+    async with AsyncSessionLocal() as session:
+        thread_id = f"thread-{uuid.uuid4()}"
+        new_thread = ThreadModel(
+            id=thread_id,
+            project_id=_normalize_project_id(project_id),
+            title=title
+        )
+        session.add(new_thread)
+        await session.commit()
+        
+        return {"thread_id": thread_id, "title": title}
+
+@router.get("/{project_id}/threads", response_model=List[dict])
+async def get_project_threads(
+    project_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all unique chat threads for a project.
+    """
+    from app.core.database import AsyncSessionLocal, MessageModel, ThreadModel, _normalize_project_id
+    from sqlalchemy import select, desc, func, or_
+
+    # RBAC check (reuse get_project logic or simple check)
+    await _get_project_or_recover(project_id, current_user)
+
+    async with AsyncSessionLocal() as session:
+        p_id = _normalize_project_id(project_id)
+        
+        # [Task 1] Query real ThreadModel table first
+        stmt = select(ThreadModel).where(ThreadModel.project_id == p_id).order_by(ThreadModel.updated_at.desc())
+        if project_id == "system-master":
+             stmt = select(ThreadModel).where(or_(ThreadModel.project_id == None, ThreadModel.project_id == p_id)).order_by(ThreadModel.updated_at.desc())
+             
+        result = await session.execute(stmt)
+        threads = result.scalars().all()
+        
+        # [Fix] If no threads found in ThreadModel, fallback to Message grouping (legacy support)
+        # But ensure we return consistent structure.
+        if not threads:
+             if project_id == "system-master":
+                 # Filter for system-master or null
+                  stmt = select(MessageModel.thread_id, func.max(MessageModel.timestamp).label("last_update"), func.min(MessageModel.content).label("preview")) \
+                     .where(or_(MessageModel.project_id == None, MessageModel.project_id == "system-master")) \
+                     .group_by(MessageModel.thread_id) \
+                     .order_by(desc("last_update"))
+             else:
+                 stmt = select(MessageModel.thread_id, func.max(MessageModel.timestamp).label("last_update"), func.min(MessageModel.content).label("preview")) \
+                     .where(MessageModel.project_id == p_id) \
+                     .group_by(MessageModel.thread_id) \
+                     .order_by(desc("last_update"))
+                     
+             result = await session.execute(stmt)
+             raw_threads = result.all()
+             
+             # Map raw message groups to thread-like structure
+             return [
+                {
+                    "thread_id": t.thread_id,
+                    "title": (t.preview[:30] + "...") if t.preview else "대화 내용", # "New Conversation" -> "대화 내용" to indicate legacy
+                    "updated_at": t.last_update
+                }
+                for t in raw_threads if t.thread_id
+            ]
+        
+        return [
+            {
+                "thread_id": t.id,
+                "title": t.title,
+                "updated_at": t.updated_at
+            }
+            for t in threads
+        ]
+
+@router.get("/{project_id}/threads/{thread_id}/messages", response_model=List[ChatMessageResponse])
+async def get_thread_messages(
+    project_id: str,
+    thread_id: str,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get messages for a specific thread in a project.
+    Strictly isolated by thread_id.
+    """
+    import structlog
+    logger = structlog.get_logger(__name__)
+    logger.info("AUDIT: get_thread_messages called", project_id=project_id, thread_id=thread_id, user_id=current_user.id)
+    
+    # [CRITICAL FIX] Print Debug - Force visibility
+    print(f"DEBUG: get_thread_messages - ProjectID: {project_id}, ThreadID: {thread_id}")
+
+    # Reuse existing logic but force thread_id
+    result = await get_chat_history(project_id, limit, thread_id, current_user)
+    
+    # [CRITICAL FIX] Print result count
+    print(f"DEBUG: Returning {len(result)} messages for thread {thread_id}")
+    
+    return result
+
 @router.get("/{project_id}/chat-history", response_model=List[ChatMessageResponse])
 async def get_chat_history(
     project_id: str,
@@ -362,12 +557,16 @@ async def get_chat_history(
     current_user: User = Depends(get_current_user)
 ):
     """Get chat history for a project (Global Timeline for the project)"""
+    import structlog
+    logger = structlog.get_logger(__name__)
+    logger.info("AUDIT: get_chat_history called", project_id=project_id, thread_id=thread_id, user_id=current_user.id)
+
     # [Resilience] Neo4j에 프로젝트 노드가 없더라도 RDB에 히스토리가 있으면 보여줌 (404 방지)
     try:
         await _get_project_or_recover(project_id, current_user)
     except HTTPException as e:
         if e.status_code == 404:
-            print(f"DEBUG: Project {project_id} not found in Neo4j, but attempting to fetch RDB history.")
+            pass # RDB fallback
         else:
             raise e
     
@@ -377,6 +576,10 @@ async def get_chat_history(
     async with AsyncSessionLocal() as session:
         # [CRITICAL] system-master인 경우 project_id가 NULL인 데이터도 함께 가져와야 함
         p_id = _normalize_project_id(project_id)
+        
+        # [CRITICAL FIX] Print debug before query
+        print(f"DEBUG: SQL Query - project_id normalized: {p_id}, thread_id filter: {thread_id}")
+        
         if project_id == "system-master":
             stmt = select(MessageModel).where(
                 or_(MessageModel.project_id == None, MessageModel.project_id == "system-master")
@@ -384,12 +587,25 @@ async def get_chat_history(
         else:
             stmt = select(MessageModel).where(MessageModel.project_id == p_id)
             
+        # [Fix] Filter by Thread ID if provided (Room Architecture)
+        if thread_id:
+            stmt = stmt.where(MessageModel.thread_id == thread_id)
+            print(f"DEBUG: Applied thread_id filter: {thread_id}")
+            
         stmt = stmt.order_by(MessageModel.timestamp.desc()).limit(limit)
         
         result = await session.execute(stmt)
         messages = result.scalars().all()
+        
+        # [CRITICAL FIX] Print raw query result
+        print(f"DEBUG: Raw query returned {len(messages)} messages")
+        if messages:
+            print(f"DEBUG: Sample message thread_id: {messages[0].thread_id}")
+        
         # 사용자가 보기 편하게 다시 과거->현재 순으로 뒤집음
         messages = sorted(messages, key=lambda x: x.timestamp)
+        
+        logger.info("AUDIT: get_chat_history result", count=len(messages), project_id=project_id, thread_id=thread_id)
     
     # Filter roles and empty content for chat history
     chat_list = []
@@ -409,7 +625,8 @@ async def get_chat_history(
             content=m.content,
             created_at=m.timestamp.isoformat() if m.timestamp else datetime.utcnow().isoformat(),
             thread_id=m.thread_id,
-            project_id=str(m.project_id) if m.project_id else project_id
+            project_id=str(m.project_id) if m.project_id else project_id,
+            request_id=m.metadata_json.get("request_id") if m.metadata_json else None # [v4.2] Restore request_id
         ))
     return chat_list
 
@@ -418,8 +635,18 @@ async def get_knowledge_graph(
     project_id: str,
     current_user: User = Depends(get_current_user)
 ):
-    """Get the knowledge graph for a project"""
+    """Get the knowledge graph for a project (Admin Only)"""
+    if current_user.role == UserRole.STANDARD_USER:
+        raise HTTPException(status_code=403, detail="Standard users cannot access knowledge graph")
+
+    # [v5.0 CRITICAL] Log project_id for isolation verification
+    print(f"DEBUG: [API] get_knowledge_graph called for project: '{project_id}' by user: {current_user.email}")
+    
     await _get_project_or_recover(project_id, current_user)
         
     graph = await neo4j_client.get_knowledge_graph(project_id)
+    
+    # [v5.0 CRITICAL] Log result for isolation verification
+    print(f"DEBUG: [API] Returning {len(graph.get('nodes', []))} nodes and {len(graph.get('links', []))} links for project '{project_id}'")
+    
     return graph

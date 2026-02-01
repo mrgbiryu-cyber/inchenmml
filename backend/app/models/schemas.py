@@ -358,6 +358,7 @@ class ChatMessageResponse(BaseModel):
     created_at: str = Field(..., description="ISO formatted timestamp")
     thread_id: Optional[str] = None
     project_id: Optional[str] = None
+    request_id: Optional[str] = None # [v4.2] Source Tracking ID
 
     class Config:
         from_attributes = True

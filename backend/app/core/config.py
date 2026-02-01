@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     
     # Server
     HOST: str = "0.0.0.0"
-    PORT: int = 8000
+    PORT: int = 8002
     
     # Database
     DATABASE_URL: Optional[str] = None
@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     LLM_LOW_TIER_MODEL: str = "gpt-4o-mini"
     DAILY_BUDGET_USD: float = 5.0
     COST_FILTER_MIN_CHARS: int = 10
-    BATCH_INTERVAL_SEC: int = 30
+    BATCH_INTERVAL_SEC: int = 5  # [v5.0 DEBUG] Reduced from 30 for faster testing
     
     # [PHASE3_MVP] Model Strategy (Deterministic Baseline)
     # Primary/Secondary 모델은 "한 곳(config)에서만" 관리합니다.

@@ -239,7 +239,7 @@ class JobPoller:
     
     async def send_heartbeat(self):
         """
-        Send heartbeat to backend
+        Send heartbeat to backend with improved error handling
         
         Runs periodically to indicate worker is alive
         """
@@ -256,7 +256,8 @@ class JobPoller:
                         }
                         for cap in self.config.capabilities
                     ]
-                }
+                },
+                timeout=10.0  # Shorter timeout for heartbeat
             )
             
             if response.status_code == 200:
@@ -264,11 +265,18 @@ class JobPoller:
             else:
                 logger.warning(
                     "Heartbeat failed",
-                    status_code=response.status_code
+                    status_code=response.status_code,
+                    response_text=response.text[:100] if response.text else ""
                 )
                 
+        except httpx.TimeoutException:
+            logger.warning("Heartbeat timeout (backend may be restarting)")
+        except httpx.ConnectError as e:
+            logger.warning(f"Heartbeat connection error: {type(e).__name__} - backend may be down")
+        except httpx.HTTPError as e:
+            logger.error(f"Heartbeat HTTP error: {type(e).__name__} - {str(e)}")
         except Exception as e:
-            logger.error("Failed to send heartbeat", error=str(e))
+            logger.error(f"Failed to send heartbeat: {type(e).__name__} - {str(e) if str(e) else 'Unknown error'}")
     
     async def heartbeat_loop(self):
         """Background task to send periodic heartbeats"""

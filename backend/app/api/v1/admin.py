@@ -11,12 +11,10 @@ if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
 from app.core.security import get_password_hash
 from app.models.schemas import User, UserInDB, UserRole, UserQuota, Domain
 from app.api.dependencies import get_current_user
+from app.core.database import AsyncSessionLocal, UserModel
+from sqlalchemy import select
 
 router = APIRouter()
-
-# Mock database for demonstration (In production, use real DB)
-# This should be replaced with actual DB calls
-from app.api.v1.auth import MOCK_USERS_DB
 
 # Mock database for domains (In production, use real DB)
 MOCK_DOMAINS_DB = {}
@@ -36,9 +34,18 @@ async def list_users(
     current_user: User = Depends(check_super_admin)
 ):
     """List all users (Super Admin only)"""
-    # In a real app, query the DB
-    # For now, return a mock list or empty
-    return list(MOCK_USERS_DB.values())[skip : skip + limit]
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(UserModel).offset(skip).limit(limit))
+        users = result.scalars().all()
+        return [
+            User(
+                id=u.id,
+                username=u.username,
+                tenant_id=u.tenant_id,
+                role=UserRole(u.role),
+                is_active=bool(u.is_active)
+            ) for u in users
+        ]
 
 @router.patch("/users/{user_id}/quota", response_model=User)
 async def update_user_quota(
@@ -47,17 +54,22 @@ async def update_user_quota(
     current_user: User = Depends(check_super_admin)
 ):
     """Update a user's quota limits"""
-    if user_id not in MOCK_USERS_DB:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    user_dict = MOCK_USERS_DB[user_id]
-    # quota is a Pydantic model, need to convert to dict or store as is?
-    # User model expects quota as UserQuota model.
-    # But MOCK_USERS_DB stores dicts.
-    # Let's store it as a dict in the DB mock.
-    user_dict["quota"] = quota.dict()
-    
-    return User(**user_dict)
+    # TODO: Implement quota in RDB
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(UserModel).where(UserModel.id == user_id))
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Currently UserModel doesn't support quota
+        return User(
+            id=user.id,
+            username=user.username,
+            tenant_id=user.tenant_id,
+            role=UserRole(user.role),
+            is_active=bool(user.is_active)
+        )
 
 @router.post("/domains", response_model=Domain)
 async def create_domain(
@@ -78,27 +90,21 @@ async def grant_domain_access(
     current_user: User = Depends(check_super_admin)
 ):
     """Grant domain access to a user"""
-    # Find user by ID
-    target_username = None
-    user_dict = None
-    for username, u in MOCK_USERS_DB.items():
-        if u["id"] == user_id:
-            target_username = username
-            user_dict = u
-            break
-            
-    if not user_dict:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Initialize allowed_domains if not present
-    if "allowed_domains" not in user_dict:
-        user_dict["allowed_domains"] = []
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(UserModel).where(UserModel.id == user_id))
+        user = result.scalar_one_or_none()
         
-    if domain_id not in user_dict["allowed_domains"]:
-        user_dict["allowed_domains"].append(domain_id)
-        # MOCK_USERS_DB is mutable, so this update persists in memory
-    
-    return User(**user_dict)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+            
+        # TODO: Implement allowed_domains in RDB or UserProjectModel
+        return User(
+            id=user.id,
+            username=user.username,
+            tenant_id=user.tenant_id,
+            role=UserRole(user.role),
+            is_active=bool(user.is_active)
+        )
 
 @router.delete("/users/{user_id}/domains/{domain_id}", response_model=User)
 async def revoke_domain_access(
@@ -107,12 +113,18 @@ async def revoke_domain_access(
     current_user: User = Depends(check_super_admin)
 ):
     """Revoke domain access from a user"""
-    if user_id not in MOCK_USERS_DB:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    user_dict = MOCK_USERS_DB[user_id]
-    
-    if "allowed_domains" in user_dict and domain_id in user_dict["allowed_domains"]:
-        user_dict["allowed_domains"].remove(domain_id)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(UserModel).where(UserModel.id == user_id))
+        user = result.scalar_one_or_none()
         
-    return User(**user_dict)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+            
+        # TODO: Implement allowed_domains in RDB or UserProjectModel
+        return User(
+            id=user.id,
+            username=user.username,
+            tenant_id=user.tenant_id,
+            role=UserRole(user.role),
+            is_active=bool(user.is_active)
+        )

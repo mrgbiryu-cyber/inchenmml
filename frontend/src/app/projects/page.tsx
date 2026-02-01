@@ -3,12 +3,14 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import api from '@/lib/axios-config';
+import { useAuthStore } from '@/store/useAuthStore';
 import { Project } from '@/types/project';
 import { MessageSquare, Settings, ArrowRight } from 'lucide-react';
 
 export default function ProjectsPage() {
     const [projects, setProjects] = useState<Project[]>([]);
     const [loading, setLoading] = useState(true);
+    const { user } = useAuthStore();
 
     useEffect(() => {
         fetchProjects();
@@ -40,6 +42,7 @@ export default function ProjectsPage() {
             </div>
 
             {/* Master Butler Section - Separate from projects */}
+            {user?.role === 'super_admin' && (
             <div className="mb-12">
                 <h2 className="text-sm font-bold text-zinc-500 uppercase tracking-widest mb-4">Command Center</h2>
                 <Link
@@ -73,6 +76,7 @@ export default function ProjectsPage() {
                     </div>
                 </Link>
             </div>
+            )}
 
             <h2 className="text-sm font-bold text-zinc-500 uppercase tracking-widest mb-4">Active Projects</h2>
             {projects.length === 0 ? (

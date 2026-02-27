@@ -10,8 +10,8 @@ from dotenv import load_dotenv  # 👈 [추가] 강제 로딩 도구
 # (현재 폴더의 .env를 시스템 환경변수로 로드함)
 load_dotenv()
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
@@ -28,11 +28,20 @@ class Settings(BaseSettings):
     PORT: int = 8002
     
     # Database
-    DATABASE_URL: Optional[str] = None
-    REDIS_URL: str = "redis://localhost:6379/0"
-    NEO4J_URI: str = "bolt://localhost:7687"
-    NEO4J_USER: str = "neo4j"
-    NEO4J_PASSWORD: str = "buja_password_change_this"
+    DATABASE_URL: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("DATABASE_URL", "POSTGRES_URL", "POSTGRESQL_URL"),
+    )
+    REDIS_URL: Optional[str] = None
+    STARTUP_WITHOUT_REDIS: bool = False
+    STARTUP_WITHOUT_POSTGRES: bool = False
+    STRICT_DB_MODE: bool = False
+    NEO4J_URI: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("NEO4J_URI", "NEO4J_URL"),
+    )
+    NEO4J_USER: Optional[str] = None
+    NEO4J_PASSWORD: Optional[str] = None
     
     # Vector Database
     PINECONE_API_KEY: Optional[str] = None
@@ -74,6 +83,8 @@ class Settings(BaseSettings):
     MAX_QUEUED_JOBS_PER_TENANT: int = 50
     JOB_DEFAULT_TIMEOUT_SEC: int = 600
     JOB_MAX_TIMEOUT_SEC: int = 3600
+    JOB_MAX_RETRIES: int = 2
+    JOB_DLQ_TTL_SEC: int = 1209600
     
     # Worker Management
     WORKER_HEARTBEAT_TIMEOUT_SEC: int = 120
@@ -86,6 +97,11 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000,http://100.77.67.1:3000"
     CORS_ALLOW_CREDENTIALS: bool = True
+
+    # Health check timeout (milliseconds)
+    HEALTH_REDIS_TIMEOUT_MS: int = 300
+    HEALTH_POSTGRES_TIMEOUT_MS: int = 500
+    HEALTH_NEO4J_TIMEOUT_MS: int = 700
     
     # [NEW] Cost Safety Guard Configuration
     LLM_HIGH_TIER_MODEL: str = "google/gemini-2.0-flash-001"

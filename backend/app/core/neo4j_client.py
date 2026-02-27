@@ -1,9 +1,12 @@
-from neo4j import AsyncGraphDatabase
+﻿from neo4j import AsyncGraphDatabase
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import asyncio
 from app.core.config import settings
+from structlog import get_logger
 from app.models.schemas import Project, AgentDefinition
+
+logger = get_logger(__name__)
 
 class Neo4jClient:
     def __init__(self):
@@ -18,7 +21,7 @@ class Neo4jClient:
                     max_connection_lifetime=600
                 )
             except Exception as e:
-                print(f"DEBUG: Neo4j driver initialization failed: {e}")
+                logger.debug(f"DEBUG: Neo4j driver initialization failed: {e}")
 
     async def verify_connectivity(self) -> bool:
         if not self.driver:
@@ -37,6 +40,15 @@ class Neo4jClient:
 
     async def create_project_graph(self, project: Project):
         if not self.driver:
+            return
+
+        # Skip persistence when Neo4j is unavailable in external service mode.
+        # This keeps API usable for DB-only smoke checks (eg. Step1~3).
+        if not await self.verify_connectivity():
+            logger.debug(
+                "DEBUG: Neo4j connectivity check failed - skip create_project_graph for "
+                f"{project.id}"
+            )
             return
 
         clear_query = """
@@ -81,29 +93,33 @@ class Neo4jClient:
         if project.agent_config:
             for agent in project.agent_config.agents:
                 a_dict = agent.dict()
-                # config를 JSON 문자열로 변환하여 전달
+                # config瑜?JSON 臾몄옄?대줈 蹂?섑븯???꾨떖
                 a_dict["config_json"] = json.dumps(a_dict.get("config", {}), ensure_ascii=False)
                 agents_data.append(a_dict)
         
-        async with self.driver.session() as session:
-            await session.run(clear_query, {"project_id": project.id})
-            await session.run(query, {
-                "project_id": project.id,
-                "name": project.name,
-                "description": project.description,
-                "project_type": project.project_type,
-                "repo_path": project.repo_path,
-                "tenant_id": project.tenant_id,
-                "user_id": project.user_id,
-                "created_at": project.created_at.isoformat() if isinstance(project.created_at, datetime) else project.created_at,
-                "updated_at": project.updated_at.isoformat() if isinstance(project.updated_at, datetime) else project.updated_at,
-                "workflow_type": project.agent_config.workflow_type if project.agent_config else "SEQUENTIAL",
-                "entry_agent_id": project.agent_config.entry_agent_id if project.agent_config else None,
-                "agents": agents_data
-            })
+        try:
+            async with self.driver.session() as session:
+                await session.run(clear_query, {"project_id": project.id})
+                await session.run(query, {
+                    "project_id": project.id,
+                    "name": project.name,
+                    "description": project.description,
+                    "project_type": project.project_type,
+                    "repo_path": project.repo_path,
+                    "tenant_id": project.tenant_id,
+                    "user_id": project.user_id,
+                    "created_at": project.created_at.isoformat() if isinstance(project.created_at, datetime) else project.created_at,
+                    "updated_at": project.updated_at.isoformat() if isinstance(project.updated_at, datetime) else project.updated_at,
+                    "workflow_type": project.agent_config.workflow_type if project.agent_config else "SEQUENTIAL",
+                    "entry_agent_id": project.agent_config.entry_agent_id if project.agent_config else None,
+                    "agents": agents_data
+                })
+        except Exception as e:
+            logger.debug(f"DEBUG: Neo4j create_project_graph skipped due error: {e}")
+            return
 
     async def delete_project_agents(self, project_id: str):
-        """프로젝트에 연결된 모든 에이전트 노드와 관계를 물리적으로 삭제합니다."""
+        """?꾨줈?앺듃???곌껐??紐⑤뱺 ?먯씠?꾪듃 ?몃뱶? 愿怨꾨? 臾쇰━?곸쑝濡???젣?⑸땲??"""
         if self.driver:
             query = """
             MATCH (p:Project {id: $project_id})
@@ -147,7 +163,7 @@ class Neo4jClient:
                     a_data["agent_id"] = a_id
                     del a_data["id"]
                     
-                    # config_json 복구
+                    # config_json 蹂듦뎄
                     if "config_json" in a_data:
                         try:
                             a_data["config"] = json.loads(a_data["config_json"])
@@ -242,19 +258,18 @@ class Neo4jClient:
 
     async def save_chat_message(self, project_id: str, role: str, content: str, thread_id: Optional[str] = None, user_id: Optional[str] = None):
         """
-        [DEPRECATED] ChatMessage 노드는 더 이상 사용하지 않음
-        RDB (PostgreSQL)가 Single Source of Truth
-        대화 맥락은 ConversationChunk 노드로 관리
-        """
-        # 비활성화: 중복 저장 방지
+        [DEPRECATED] ChatMessage ?몃뱶?????댁긽 ?ъ슜?섏? ?딆쓬
+        RDB (PostgreSQL)媛 Single Source of Truth
+        ???留λ씫? ConversationChunk ?몃뱶濡?愿由?        """
+        # 鍮꾪솢?깊솕: 以묐났 ???諛⑹?
         pass
 
     async def get_chat_history(self, project_id: str, limit: int = 50, thread_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        [DEPRECATED] ChatMessage 노드는 더 이상 사용하지 않음
-        RDB (PostgreSQL)의 get_messages_from_rdb() 사용
+        [DEPRECATED] ChatMessage ?몃뱶?????댁긽 ?ъ슜?섏? ?딆쓬
+        RDB (PostgreSQL)??get_messages_from_rdb() ?ъ슜
         """
-        # 비활성화: RDB 사용
+        # 鍮꾪솢?깊솕: RDB ?ъ슜
         return []
         
         # messages = []
@@ -320,22 +335,22 @@ class Neo4jClient:
                         items.append(data)
                 return items
             except Exception as e:
-                print(f"❌ Neo4j inner query error: {e}")
+                logger.debug(f"??Neo4j inner query error: {e}")
                 return []
         try:
             return await asyncio.wait_for(_execute(), timeout=5.0)
         except asyncio.TimeoutError:
-            print(f"⚠️ Neo4j query timed out for query: {query_text}")
+            logger.debug(f"?좑툘 Neo4j query timed out for query: {query_text}")
             return []
         except Exception as e:
-            print(f"❌ Neo4j query wrapper error: {e}")
+            logger.debug(f"??Neo4j query wrapper error: {e}")
             return []
 
     async def get_knowledge_graph(self, project_id: str) -> Dict[str, Any]:
         if not self.driver: return {"nodes": [], "links": []}
         
         # [CRITICAL FIX] Print debug with exact project_id
-        print(f"DEBUG: [Neo4j] get_knowledge_graph called for project: '{project_id}' (type: {type(project_id)})")
+        logger.debug(f"DEBUG: [Neo4j] get_knowledge_graph called for project: '{project_id}' (type: {type(project_id)})")
         
         # [v5.0 CRITICAL FIX] Optimized query - Separate nodes and relationships
         # Step 1: Get all knowledge nodes for this project
@@ -361,7 +376,7 @@ class Neo4jClient:
         
         async with self.driver.session() as session:
             # [CRITICAL FIX] Log before query execution
-            print(f"DEBUG: [Neo4j] Executing Cypher query with project_id: '{project_id}'")
+            logger.debug(f"DEBUG: [Neo4j] Executing Cypher query with project_id: '{project_id}'")
             
             result = await session.run(query, {"project_id": project_id})
             
@@ -394,7 +409,7 @@ class Neo4jClient:
                     # [CRITICAL FIX] Log node's project_id for verification
                     node_project_id = n.get("project_id", "NONE")
                     if record_count <= 3:  # Only log first 3 nodes
-                        print(f"DEBUG: [Neo4j] Node {n_id} has project_id: '{node_project_id}' (expected: '{project_id}')")
+                        logger.debug(f"DEBUG: [Neo4j] Node {n_id} has project_id: '{node_project_id}' (expected: '{project_id}')")
                     
                     # [v5.0 FIX] Flatten critical properties for Frontend Interface (GraphNode)
                     node_props = dict(n)
@@ -438,16 +453,16 @@ class Neo4jClient:
                         if link_obj not in links:
                             links.append(link_obj)
                             if len(links) <= 3:  # Log first 3 links
-                                print(f"DEBUG: [Neo4j] Link added: {s_id[:12]}... -{rel_type}-> {t_id[:12]}...")
+                                logger.debug(f"DEBUG: [Neo4j] Link added: {s_id[:12]}... -{rel_type}-> {t_id[:12]}...")
         
         # [CRITICAL FIX] Print final result summary
-        print(f"DEBUG: [Neo4j] Query processed {record_count} records")
-        print(f"DEBUG: [Neo4j] Returning {len(nodes)} nodes and {len(links)} links for project '{project_id}'")
+        logger.debug(f"DEBUG: [Neo4j] Query processed {record_count} records")
+        logger.debug(f"DEBUG: [Neo4j] Returning {len(nodes)} nodes and {len(links)} links for project '{project_id}'")
         
         # [v5.0 FIX] Check raw DB in a new session to avoid "Session closed" error
         if len(links) == 0 and len(nodes) > 0:
-            print(f"WARNING: [Neo4j] {len(nodes)} nodes exist but 0 relationships found!")
-            print(f"WARNING: [Neo4j] Checking raw DB for relationships with project_id '{project_id}'...")
+            logger.debug(f"WARNING: [Neo4j] {len(nodes)} nodes exist but 0 relationships found!")
+            logger.debug(f"WARNING: [Neo4j] Checking raw DB for relationships with project_id '{project_id}'...")
             try:
                 # Open a NEW session for the raw DB check
                 async with self.driver.session() as check_session:
@@ -468,8 +483,8 @@ class Neo4jClient:
                         total_rels += count
                     
                     if rel_types:
-                        print(f"WARNING: [Neo4j] Found {total_rels} raw relationships in DB but query returned 0!")
-                        print(f"         Relationship types: {', '.join(rel_types)}")
+                        logger.debug(f"WARNING: [Neo4j] Found {total_rels} raw relationships in DB but query returned 0!")
+                        logger.debug(f"         Relationship types: {', '.join(rel_types)}")
                         
                         # [v5.0] Sample actual knowledge node relationships
                         sample_query = """
@@ -486,13 +501,13 @@ class Neo4jClient:
                             samples.append(dict(sample_record))
                         
                         if samples:
-                            print(f"         Sample knowledge-to-knowledge relationships:")
+                            logger.debug(f"         Sample knowledge-to-knowledge relationships:")
                             for i, rel in enumerate(samples):
-                                print(f"           {i+1}. {rel['source_id'][:12]}... -{rel['rel_type']}-> {rel['target_id'][:12]}...")
+                                logger.debug(f"           {i+1}. {rel['source_id'][:12]}... -{rel['rel_type']}-> {rel['target_id'][:12]}...")
                     else:
-                        print(f"WARNING: [Neo4j] No relationships found in raw DB either. They may not have been created.")
+                        logger.debug(f"WARNING: [Neo4j] No relationships found in raw DB either. They may not have been created.")
             except Exception as check_err:
-                print(f"ERROR: [Neo4j] Failed to check raw relationships: {check_err}")
+                logger.debug(f"ERROR: [Neo4j] Failed to check raw relationships: {check_err}")
         
         return {"nodes": nodes, "links": links}
 
@@ -523,3 +538,4 @@ class Neo4jClient:
                 except: pass
 
 neo4j_client = Neo4jClient()
+

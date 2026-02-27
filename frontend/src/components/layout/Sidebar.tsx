@@ -196,6 +196,14 @@ export default function Sidebar() {
                                 <Shield size={18} />
                                 Master Butler
                             </Link>
+                            <Link
+                                href="/admin/rules"
+                                onClick={() => setIsOpen(false)}
+                                className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all text-sm font-medium ${isActive('/admin/rules')}`}
+                            >
+                                <Database size={18} />
+                                Rule Tuning
+                            </Link>
                         </nav>
                     </div>
                     )}

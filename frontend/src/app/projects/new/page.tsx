@@ -10,7 +10,7 @@ export default function NewProjectPage() {
     const [form, setForm] = useState({
         name: '',
         description: '',
-        project_type: 'NEW', // 'NEW' | 'EXISTING'
+        project_type: 'GROWTH_SUPPORT',
         repo_path: ''
     });
 
@@ -18,8 +18,9 @@ export default function NewProjectPage() {
         e.preventDefault();
         setLoading(true);
         try {
-            await api.post('/projects/', form);
-            router.push('/projects');
+            const res = await api.post('/projects/', form);
+            // Redirect straight to project chat for Interview
+            router.push(`/chat?projectId=${res.data.id}`);
         } catch (error) {
             console.error("Failed to create project", error);
             alert("Failed to create project");
@@ -55,50 +56,7 @@ export default function NewProjectPage() {
                     />
                 </div>
 
-                <div>
-                    <label className="block text-sm font-medium text-zinc-400 mb-2">Project Type</label>
-                    <div className="grid grid-cols-2 gap-4">
-                        <button
-                            type="button"
-                            onClick={() => setForm({ ...form, project_type: 'NEW' })}
-                            className={`p-4 rounded-lg border text-center transition-colors ${form.project_type === 'NEW'
-                                    ? 'bg-purple-900/30 border-purple-500 text-white'
-                                    : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-750'
-                                }`}
-                        >
-                            <div className="font-semibold mb-1">New Project</div>
-                            <div className="text-xs opacity-70">Start from scratch</div>
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setForm({ ...form, project_type: 'EXISTING' })}
-                            className={`p-4 rounded-lg border text-center transition-colors ${form.project_type === 'EXISTING'
-                                    ? 'bg-purple-900/30 border-purple-500 text-white'
-                                    : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-750'
-                                }`}
-                        >
-                            <div className="font-semibold mb-1">Existing Codebase</div>
-                            <div className="text-xs opacity-70">Import local repository</div>
-                        </button>
-                    </div>
-                </div>
 
-                {form.project_type === 'EXISTING' && (
-                    <div>
-                        <label className="block text-sm font-medium text-zinc-400 mb-2">Local Repository Path</label>
-                        <input
-                            type="text"
-                            value={form.repo_path}
-                            onChange={(e) => setForm({ ...form, repo_path: e.target.value })}
-                            className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-purple-500 focus:outline-none"
-                            placeholder="/path/to/your/project"
-                            required
-                        />
-                        <p className="text-xs text-zinc-500 mt-1">
-                            The worker must have access to this path.
-                        </p>
-                    </div>
-                )}
 
                 <div className="flex justify-end space-x-4 pt-4 border-t border-zinc-800">
                     <button

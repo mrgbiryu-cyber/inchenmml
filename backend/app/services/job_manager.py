@@ -16,6 +16,7 @@ from uuid import uuid4
 import time
 import hashlib
 import json
+from datetime import datetime, timezone
 
 import redis.asyncio as redis
 from structlog import get_logger
@@ -64,6 +65,45 @@ class JobManager:
             redis_client: Async Redis client
         """
         self.redis = redis_client
+
+    async def _load_job(self, job_id: str) -> Optional[Job]:
+        """Load job spec from Redis."""
+        job_json = await self.redis.get(f"job:{job_id}:spec")
+        if not job_json:
+            return None
+        return Job.parse_raw(job_json)
+
+    async def _save_job_spec(self, job: Job) -> None:
+        """Persist updated job spec."""
+        await self.redis.set(f"job:{job.job_id}:spec", job.json())
+        await self.redis.expire(f"job:{job.job_id}:spec", 604800)
+
+    async def _move_to_dlq(
+        self,
+        job: Job,
+        result: Optional[JobResult] = None,
+        reason: str = "max_retries_exceeded",
+    ) -> None:
+        """Store failed job metadata in tenant-scoped dead-letter queue."""
+        dlq_key = f"job_dlq:{job.tenant_id}"
+        entry = {
+            "job_id": str(job.job_id),
+            "tenant_id": job.tenant_id,
+            "user_id": job.user_id,
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+            "retry_count": job.retry_count,
+            "reason": reason,
+            "result": json.loads(result.json()) if result else None,
+        }
+        await self.redis.rpush(dlq_key, json.dumps(entry, ensure_ascii=False))
+        await self.redis.expire(dlq_key, settings.JOB_DLQ_TTL_SEC)
+        logger.error(
+            "Job moved to DLQ",
+            job_id=str(job.job_id),
+            tenant_id=job.tenant_id,
+            retry_count=job.retry_count,
+            reason=reason,
+        )
     
     async def create_job(
         self,
@@ -357,31 +397,42 @@ class JobManager:
         """
         Update job status (called by workers or internal processes)
         """
+        job = await self._load_job(job_id)
+
+        # Save result payload if provided.
+        if result:
+            await self.redis.set(f"job:{job_id}:result", result.json())
+
+        # Retry/DLQ branch for failed jobs.
+        if status == JobStatus.FAILED and job:
+            job.retry_count += 1
+            max_retries = max(0, int(settings.JOB_MAX_RETRIES))
+            if job.retry_count <= max_retries:
+                job.status = JobStatus.QUEUED
+                await self._save_job_spec(job)
+                await self.redis.set(f"job:{job_id}:status", JobStatus.QUEUED.value)
+                await self.redis.rpush(f"job_queue:{job.tenant_id}", job.json())
+                logger.warning(
+                    "Job failed and requeued",
+                    job_id=job_id,
+                    retry_count=job.retry_count,
+                    max_retries=max_retries,
+                )
+                return
+
+            # Retries exhausted: keep FAILED status and push to DLQ.
+            await self._move_to_dlq(job, result=result)
+            job.status = JobStatus.FAILED
+            await self._save_job_spec(job)
+
         # Update status
         await self.redis.set(f"job:{job_id}:status", status.value)
-        
-        # Save result if provided
-        if result:
-            await self.redis.set(
-                f"job:{job_id}:result",
-                result.json()
-            )
-        
+
         # Set completion timestamp
         if status in [JobStatus.COMPLETED, JobStatus.FAILED]:
-            await self.redis.set(
-                f"job:{job_id}:completed_at",
-                int(time.time())
-            )
-        
-        # [Reliable Queue] If job is finished, we should ideally remove it from processing lists.
-        # This is handled by workers explicitly or via cleanup tools.
+            await self.redis.set(f"job:{job_id}:completed_at", int(time.time()))
 
-        logger.info(
-            "Job status updated",
-            job_id=job_id,
-            status=status.value
-        )
+        logger.info("Job status updated", job_id=job_id, status=status.value)
 
     async def clear_queue(self, tenant_id: str) -> int:
         """Clear all jobs from a tenant's queue"""

@@ -1,0 +1,42 @@
+# Docs and markdown artifacts
+docs/
+doc/
+*.md
+*.MD
+
+# Local env and secrets
+.env
+.env.*
+*.pem
+*_key*
+
+# Logs and caches
+*.log
+pytest-cache-*/
+.pytest_cache/
+__pycache__/
+*/__pycache__/
+
+# Test and debug scripts
+scripts/test_*
+scripts/check_*
+scripts/debug_*
+scripts/simulate_*
+scripts/audit_*
+scripts/simple_test.py
+backend/scripts/test_*
+backend/scripts/check_*
+backend/scripts/debug_*
+backend/scripts/simulate_*
+backend/scripts/audit_*
+backend/scripts/simple_test.py
+
+# Test folders excluded from runtime image
+backend/tests/
+frontend/e2e/
+frontend/test-results/
+
+# Dependency and build artifacts
+frontend/node_modules/
+frontend/.next/
+backend/.venv/

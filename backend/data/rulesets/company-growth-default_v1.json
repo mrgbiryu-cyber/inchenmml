@@ -1,0 +1,74 @@
+﻿{
+  "ruleset_id": "company-growth-default",
+  "version": "v1",
+  "status": "active",
+  "description": "Default startup growth ruleset",
+  "author": "system",
+  "company_type_rules": [
+    {
+      "rule_id": "ct_pre_1",
+      "name": "Pre entrepreneur baseline",
+      "conditions": [
+        {"field": "has_corporation", "op": "eq", "value": false},
+        {"field": "annual_revenue", "op": "lte", "value": 0}
+      ],
+      "actions": [
+        {"target": "company_type", "value": "PRE_ENTREPRENEUR", "score": 1.0, "reason_code": "CT_PRE_BASE"}
+      ],
+      "weight": 1.0,
+      "enabled": true
+    },
+    {
+      "rule_id": "ct_growth_1",
+      "name": "Growth stage company baseline",
+      "conditions": [
+        {"field": "years_in_business", "op": "gte", "value": 3},
+        {"field": "annual_revenue", "op": "gte", "value": 1000000000}
+      ],
+      "actions": [
+        {"target": "company_type", "value": "GROWTH_STAGE", "score": 1.0, "reason_code": "CT_GROWTH_BASE"}
+      ],
+      "weight": 1.0,
+      "enabled": true
+    }
+  ],
+  "growth_stage_rules": [
+    {
+      "rule_id": "gs_seed_1",
+      "name": "Seed baseline",
+      "conditions": [
+        {"field": "years_in_business", "op": "lte", "value": 1},
+        {"field": "annual_revenue", "op": "lte", "value": 100000000}
+      ],
+      "actions": [
+        {"target": "growth_stage", "value": "SEED", "score": 1.0, "reason_code": "GS_SEED_BASE"}
+      ],
+      "weight": 1.0,
+      "enabled": true
+    },
+    {
+      "rule_id": "gs_scale_1",
+      "name": "Scaleup baseline",
+      "conditions": [
+        {"field": "years_in_business", "op": "gte", "value": 3},
+        {"field": "employee_count", "op": "gte", "value": 10}
+      ],
+      "actions": [
+        {"target": "growth_stage", "value": "SCALEUP", "score": 1.0, "reason_code": "GS_SCALE_BASE"}
+      ],
+      "weight": 1.0,
+      "enabled": true
+    }
+  ],
+  "matching_rules": [],
+  "weights": {
+    "company_type": 1.0,
+    "growth_stage": 1.0
+  },
+  "cutoffs": {
+    "minimum_confidence": 0.5
+  },
+  "fallback_policy": {
+    "default_confidence": 0.4
+  }
+}

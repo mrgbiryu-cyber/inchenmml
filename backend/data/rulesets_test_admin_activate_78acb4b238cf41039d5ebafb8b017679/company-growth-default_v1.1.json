@@ -1,0 +1,68 @@
+{
+  "ruleset_id": "company-growth-default",
+  "version": "v1.1",
+  "status": "active",
+  "description": null,
+  "effective_from": null,
+  "author": null,
+  "company_type_rules": [
+    {
+      "rule_id": "ct-v1.1",
+      "name": "company type v1.1",
+      "conditions": [
+        {
+          "field": "has_corporation",
+          "op": "eq",
+          "value": false
+        }
+      ],
+      "actions": [
+        {
+          "target": "company_type",
+          "value": "GROWTH_STAGE",
+          "score": 1.0,
+          "reason_code": "CT_V1.1"
+        }
+      ],
+      "weight": 1.0,
+      "enabled": true
+    }
+  ],
+  "growth_stage_rules": [
+    {
+      "rule_id": "gs-v1.1",
+      "name": "growth stage v1.1",
+      "conditions": [
+        {
+          "field": "years_in_business",
+          "op": "lt",
+          "value": 1
+        }
+      ],
+      "actions": [
+        {
+          "target": "growth_stage",
+          "value": "STARTUP",
+          "score": 1.0,
+          "reason_code": "GS_V1.1"
+        }
+      ],
+      "weight": 1.0,
+      "enabled": true
+    }
+  ],
+  "matching_rules": [],
+  "weights": {
+    "company_type": 1.0,
+    "growth_stage": 1.0
+  },
+  "cutoffs": {
+    "minimum_confidence": 0.5
+  },
+  "fallback_policy": {
+    "default_confidence": 0.4,
+    "fallback_on_low_confidence": true
+  },
+  "created_at": "2026-02-26T07:23:24.245206",
+  "updated_at": "2026-02-26T07:23:24.269120"
+}

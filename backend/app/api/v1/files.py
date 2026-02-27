@@ -4,12 +4,13 @@ File Management Endpoints
 Handles file uploads and triggers knowledge ingestion
 """
 import hashlib
+import json
 import sys
 import uuid
 import os
 from pathlib import Path
-from typing import List, Optional
-from sqlalchemy import select, func
+from typing import Dict, List, Optional
+from sqlalchemy import select
 
 # [UTF-8] Force stdout/stderr to UTF-8
 if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
@@ -20,9 +21,10 @@ from structlog import get_logger
 
 from app.core.config import settings
 from app.api.dependencies import get_current_user
-from app.models.schemas import User, UserRole
-from app.services.knowledge_service import knowledge_service, knowledge_queue
-from app.core.database import AsyncSessionLocal, MessageModel
+from app.models.schemas import User
+from app.services.knowledge_service import knowledge_queue
+from app.services.document_parser_service import document_parser_service
+from app.core.database import _normalize_project_id, AsyncSessionLocal, MessageModel
 from datetime import datetime
 
 logger = get_logger(__name__)
@@ -33,42 +35,62 @@ router = APIRouter(prefix="/files", tags=["files"])
 UPLOAD_DIR = Path("data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+def _build_error_code_message(reason_code: str, message: str) -> str:
+    return f"{reason_code}: {message}"
+
+
+def _build_folder_result(
+    filename: str,
+    status: str,
+    *,
+    reason: str = "",
+    detail: str = "",
+) -> Dict[str, str]:
+    payload: Dict[str, str] = {"filename": filename, "status": status}
+    if reason:
+        payload["reason"] = reason
+    if detail:
+        payload["detail"] = detail
+    return payload
+
+
 def calculate_file_hash(file_content: bytes) -> str:
     """Calculate SHA256 hash of file content for deduplication."""
     return hashlib.sha256(file_content).hexdigest()
 
-async def check_duplicate_file(session, file_hash: str, project_id: str) -> Optional[MessageModel]:
+def _project_id_filter(project_id: str):
+    project_uuid = _normalize_project_id(project_id)
+    if project_uuid is None:
+        return MessageModel.project_id.is_(None)
+    return MessageModel.project_id == project_uuid
+
+
+def _normalize_metadata(metadata: object) -> dict:
+    if isinstance(metadata, dict):
+        return metadata
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+async def check_duplicate_file(session, project_id: str, file_hash: str) -> Optional[MessageModel]:
     """Check if file with same hash already exists in project."""
-    # Note: JSON query might be slow without index, but acceptable for MVP
-    # In PostgreSQL we could use jsonb_path_query or containment @>
-    # Here we fetch potentially matching messages and check in python or trust the DB
-    # Optimized: We assume 'file_hash' is top-level key in metadata_json
-    stmt = select(MessageModel).where(
-        MessageModel.project_id == (uuid.UUID(project_id) if project_id != "system-master" else None),
-        func.json_extract(MessageModel.metadata_json, '$.file_hash') == file_hash
-    ).limit(1)
-    
-    # SQLite/Postgres compatibility issue with json_extract vs ->> 
-    # For MVP safety, let's fetch messages with type='file_upload' and filter in memory if volume is low,
-    # OR use a more generic approach.
-    # Let's try to add file_hash to metadata and query it safely.
-    
-    # Since we can't easily do cross-db JSON query without knowing DB type in this context perfectly,
-    # we will use a safer approach for this MVP: 
-    # Real duplication check might be better done by KnowledgeService or specific index.
-    # For now, let's skip complex DB query and rely on filename + size collision check as a proxy 
-    # or just proceed. 
-    # BUT the requirement is "Deduplication".
-    
-    # Let's read all file_uploads for this project and check hash. 
-    # Limit to recent 100 uploads for performance? Or just trust KnowledgeService de-dupe?
-    # Task explicitly says "Check hashes before processing folder uploads."
-    
-    # Better approach:
-    # 1. Fetch recent file uploads for project
-    # 2. Check hashes
-    
-    return None # Placeholder: logic implemented inside endpoints for clarity
+    stmt = (
+        select(MessageModel)
+        .where(_project_id_filter(project_id))
+        .where(MessageModel.metadata_json.is_not(None))
+        .order_by(MessageModel.timestamp.desc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    for message in rows:
+        metadata = _normalize_metadata(message.metadata_json)
+        if metadata.get("type") == "file_upload" and metadata.get("file_hash") == file_hash:
+            return message
+    return None
 
 @router.post("/upload")
 async def upload_file(
@@ -88,19 +110,27 @@ async def upload_file(
         if size > settings.MAX_FILE_SIZE_BYTES:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"File too large. Max size: {settings.MAX_FILE_SIZE_BYTES} bytes"
+                detail=_build_error_code_message(
+                    "FILE_TOO_LARGE",
+                    f"File too large. Max size: {settings.MAX_FILE_SIZE_BYTES} bytes"
+                )
             )
             
         file_hash = calculate_file_hash(content)
+        ext = os.path.splitext(file.filename)[1].lower()
+        if not document_parser_service.is_supported_extension(ext):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_build_error_code_message(
+                    "UNSUPPORTED_EXTENSION",
+                    f"Unsupported file extension: {ext or 'unknown'}"
+                )
+            )
         
         # 2. Check Deduplication
         async with AsyncSessionLocal() as session:
             # Check if this hash exists in recent uploads for this project
-            # Using basic JSON text search for compatibility
-            stmt = select(MessageModel).where(
-                MessageModel.metadata_json.like(f'%"{file_hash}"%')
-            ).limit(1)
-            existing = (await session.execute(stmt)).scalar_one_or_none()
+            existing = await check_duplicate_file(session, project_id, file_hash)
             
             if existing:
                 logger.info("Duplicate file detected, skipping upload", filename=file.filename, hash=file_hash)
@@ -113,7 +143,6 @@ async def upload_file(
 
         # 3. Save file
         file_id = str(uuid.uuid4())
-        ext = os.path.splitext(file.filename)[1]
         safe_filename = f"{file_id}{ext}"
         file_path = UPLOAD_DIR / safe_filename
         
@@ -126,20 +155,27 @@ async def upload_file(
         content_preview = f"[File Upload] {file.filename} ({size} bytes)"
         full_text = ""
         
-        if ext.lower() in ['.txt', '.md', '.py', '.js', '.ts', '.json', '.yaml', '.yml', '.html', '.css', '.csv']:
-            try:
-                full_text = content.decode('utf-8')
-                content_preview += f"\n\n--- FILE CONTENT ---\n{full_text}"
-            except Exception as e:
-                logger.warning("Failed to decode text file content", error=str(e))
-                content_preview += "\n(Binary or non-utf8 content)"
+        # Extract text using document parser service
+        parse_failed = False
+        try:
+            full_text = document_parser_service._parse_file(str(file_path), ext)
+            if full_text:
+                content_preview += f"\n\n--- FILE CONTENT ---\n{full_text[:2000]}... (truncated)"
+        except HTTPException as e:
+            parse_failed = True
+            logger.warning("Failed to parse file content", error=str(e.detail))
+            content_preview += f"\n(Parser fallback: {e.detail})"
+        except Exception as e:
+            parse_failed = True
+            logger.warning("Failed to parse file content", error=str(e))
+            content_preview += f"\n(Parser fallback: {str(e)})"
         
         # 5. Save to DB
         msg_id = str(uuid.uuid4())
         async with AsyncSessionLocal() as session:
             msg = MessageModel(
                 message_id=msg_id,
-                project_id=uuid.UUID(project_id) if project_id != "system-master" else None,
+                project_id=_normalize_project_id(project_id),
                 sender_role="user", 
                 content=content_preview,
                 timestamp=datetime.utcnow(),
@@ -156,6 +192,20 @@ async def upload_file(
             await session.commit()
             
         # 6. Trigger Knowledge Ingestion
+        if parse_failed:
+            logger.warning(
+                "Upload succeeded with parser fallback",
+                filename=file.filename,
+                project_id=project_id,
+            )
+            return {
+                "filename": file.filename,
+                "file_id": file_id,
+                "message_id": msg_id,
+                "status": "saved_only",
+                "reason": "parser_fallback",
+            }
+
         if full_text:
             knowledge_queue.put_nowait(msg_id)
             logger.info("File queued for ingestion", message_id=msg_id, project_id=project_id, user_id=current_user.id)
@@ -164,7 +214,7 @@ async def upload_file(
             "filename": file.filename,
             "file_id": file_id,
             "message_id": msg_id,
-            "status": "queued" if full_text else "saved_only"
+            "status": "queued" if full_text else "saved_only",
         }
 
     except HTTPException:
@@ -194,25 +244,51 @@ async def upload_folder(
             size = len(content)
             
             if size > settings.MAX_FILE_SIZE_BYTES:
-                results.append({"filename": file.filename, "status": "failed", "reason": "too_large"})
+                results.append(
+                    _build_folder_result(
+                        file.filename,
+                        "failed",
+                        reason="too_large",
+                        detail=_build_error_code_message(
+                            "FILE_TOO_LARGE",
+                            f"File too large. Max size: {settings.MAX_FILE_SIZE_BYTES} bytes",
+                        ),
+                    )
+                )
                 continue
                 
             file_hash = calculate_file_hash(content)
+            ext = os.path.splitext(file.filename)[1].lower()
+            if not document_parser_service.is_supported_extension(ext):
+                results.append(
+                    _build_folder_result(
+                        file.filename,
+                        "failed",
+                        reason="unsupported_type",
+                        detail=_build_error_code_message(
+                            "UNSUPPORTED_EXTENSION",
+                            f"Unsupported file extension: {ext or 'unknown'}",
+                        ),
+                    )
+                )
+                continue
             
             # Check Dedupe
             async with AsyncSessionLocal() as session:
-                stmt = select(MessageModel).where(
-                    MessageModel.metadata_json.like(f'%"{file_hash}"%')
-                ).limit(1)
-                existing = (await session.execute(stmt)).scalar_one_or_none()
+                existing = await check_duplicate_file(session, project_id, file_hash)
                 
                 if existing:
-                    results.append({"filename": file.filename, "status": "skipped", "reason": "duplicate"})
+                    results.append(
+                        _build_folder_result(
+                            file.filename,
+                            "skipped",
+                            reason="duplicate",
+                        )
+                    )
                     continue
 
             # Save
             file_id = str(uuid.uuid4())
-            ext = os.path.splitext(file.filename)[1]
             safe_filename = f"{file_id}{ext}"
             file_path = UPLOAD_DIR / safe_filename
             
@@ -223,18 +299,20 @@ async def upload_folder(
             msg_id = str(uuid.uuid4())
             content_preview = f"[Folder Upload] {file.filename}"
             full_text = ""
+            parse_failed = False
             
-            if ext.lower() in ['.txt', '.md', '.py', '.js', '.ts', '.json', '.yaml', '.yml', '.html', '.css', '.csv']:
-                try:
-                    full_text = content.decode('utf-8')
-                    content_preview += f"\n\n--- FILE CONTENT ---\n{full_text}"
-                except:
-                    pass
+            try:
+                full_text = document_parser_service._parse_file(str(file_path), ext)
+                if full_text:
+                    content_preview += f"\n\n--- FILE CONTENT ---\n{full_text[:2000]}... (truncated)"
+            except Exception as e:
+                 logger.warning("Failed to parse file content", error=str(e))
+                 parse_failed = True
             
             async with AsyncSessionLocal() as session:
                 msg = MessageModel(
                     message_id=msg_id,
-                    project_id=uuid.UUID(project_id) if project_id != "system-master" else None,
+                    project_id=_normalize_project_id(project_id),
                     sender_role="user", 
                     content=content_preview,
                     timestamp=datetime.utcnow(),
@@ -253,10 +331,39 @@ async def upload_folder(
             if full_text:
                 knowledge_queue.put_nowait(msg_id)
                 
-            results.append({"filename": file.filename, "status": "queued"})
+            if parse_failed:
+                results.append(
+                    _build_folder_result(
+                        file.filename,
+                        "saved_only",
+                        reason="parser_fallback",
+                    )
+                )
+            else:
+                results.append(_build_folder_result(file.filename, "queued"))
             
         except Exception as e:
             logger.error(f"Error processing file {file.filename}", error=str(e))
-            results.append({"filename": file.filename, "status": "failed", "error": str(e)})
+            results.append(
+                _build_folder_result(
+                    file.filename,
+                    "failed",
+                    reason="unknown",
+                    detail=str(e),
+                )
+            )
             
     return {"results": results, "total": len(files), "processed": len([r for r in results if r['status'] == 'queued'])}
+
+
+@router.post("/upload-batch")
+async def upload_batch(
+    files: List[UploadFile] = File(...),
+    project_id: str = Form("system-master"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Alias endpoint for batch file upload.
+    Supports the same behavior as /upload-folder.
+    """
+    return await upload_folder(files=files, project_id=project_id, current_user=current_user)

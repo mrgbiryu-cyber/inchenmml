@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import asyncio
-import json
 import sys
 
 # [UTF-8] Force stdout/stderr to UTF-8
@@ -9,16 +8,12 @@ if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
 if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from structlog import get_logger
 from redis.asyncio import Redis
 
 router = APIRouter()
 logger = get_logger(__name__)
-
-@router.get("/health")
-async def health_check():
-    return {"status": "ok"}
 
 @router.websocket("/ws/{project_id}")
 async def websocket_endpoint(websocket: WebSocket, project_id: str):

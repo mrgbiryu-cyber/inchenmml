@@ -1,0 +1,16 @@
+{
+  "ruleset_id": "company-growth-default",
+  "version": "v1",
+  "status": "archived",
+  "description": null,
+  "effective_from": null,
+  "author": null,
+  "company_type_rules": [],
+  "growth_stage_rules": [],
+  "matching_rules": [],
+  "weights": {},
+  "cutoffs": {},
+  "fallback_policy": {},
+  "created_at": "2026-02-26T07:19:14.091503",
+  "updated_at": "2026-02-26T07:19:14.140920"
+}

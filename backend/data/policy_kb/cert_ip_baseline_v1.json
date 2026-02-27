@@ -1,0 +1,34 @@
+﻿{
+  "kb_id": "policy-cert-ip-baseline",
+  "version": "v1",
+  "items": [
+    {
+      "category": "certification",
+      "name": "벤처기업인증",
+      "keywords": ["기술", "R&D", "투자", "특허"],
+      "required_evidence": ["기술성 설명", "매출/고용 데이터", "재무자료"],
+      "base_weight": 0.8
+    },
+    {
+      "category": "certification",
+      "name": "예비사회적기업",
+      "keywords": ["사회적가치", "고용", "지역"],
+      "required_evidence": ["사회적 목적 정관", "고용 계획", "운영 계획"],
+      "base_weight": 0.7
+    },
+    {
+      "category": "ip",
+      "name": "특허 출원",
+      "keywords": ["기술", "차별성", "알고리즘", "공정"],
+      "required_evidence": ["선행기술 조사", "명세 초안", "핵심 청구항"],
+      "base_weight": 0.9
+    },
+    {
+      "category": "ip",
+      "name": "상표 출원",
+      "keywords": ["브랜드", "서비스", "로고", "네이밍"],
+      "required_evidence": ["상표명", "사용상품/서비스류", "로고 시안"],
+      "base_weight": 0.75
+    }
+  ]
+}

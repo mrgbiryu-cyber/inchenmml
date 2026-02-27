@@ -18,6 +18,9 @@ python-multipart>=0.0.9
 redis[hiredis]>=5.0.3
 neo4j>=5.18.0
 pinecone-client>=3.1.0
+sqlalchemy>=2.0.0
+aiosqlite>=0.20.0
+asyncpg>=0.29.0
 
 # LLM & AI
 langchain>=0.1.13
@@ -51,3 +54,6 @@ pytest-asyncio==0.23.3
 black==24.1.1
 isort==5.13.2
 mypy==1.8.0
+
+# Document Rendering
+weasyprint>=62.0

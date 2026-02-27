@@ -69,6 +69,7 @@ docker/volumes/
 
 # Testing
 .pytest_cache/
+pytest-cache-*/
 .coverage
 htmlcov/
 .tox/

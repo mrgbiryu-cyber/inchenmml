@@ -29,7 +29,9 @@ services:
       - "7474:7474"  # HTTP
       - "7687:7687"  # Bolt
     environment:
-      - NEO4J_AUTH=neo4j/buja_password_change_this
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-change_me_in_env}
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-change_me_in_env}
       - NEO4J_PLUGINS=["apoc"]
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*
       - NEO4J_dbms_memory_heap_initial__size=512m
@@ -38,7 +40,7 @@ services:
       - neo4j_data:/data
       - neo4j_logs:/logs
     healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "buja_password_change_this", "RETURN 1"]
+      test: ["CMD-SHELL", "cypher-shell -u ${NEO4J_USER:-neo4j} -p ${NEO4J_PASSWORD:-change_me_in_env} \"RETURN 1\""]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -52,13 +54,13 @@ services:
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_USER=buja
-      - POSTGRES_PASSWORD=buja_password_change_this
-      - POSTGRES_DB=buja_core
+      - POSTGRES_USER=${POSTGRES_USER:-buja}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change_me_in_env}
+      - POSTGRES_DB=${POSTGRES_DB:-buja_core}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U buja"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-buja}"]
       interval: 10s
       timeout: 5s
       retries: 5

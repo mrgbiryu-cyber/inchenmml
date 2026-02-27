@@ -8,14 +8,17 @@ if sys.stdout.encoding is None or sys.stdout.encoding.lower() != 'utf-8':
 if sys.stderr.encoding is None or sys.stderr.encoding.lower() != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from datetime import datetime
 import uuid
 
 from app.models.schemas import Project, ProjectAgentConfig, User, AgentDefinition, ProjectCreate, ChatMessageResponse, UserRole
+from app.models.company import CompanyProfile
 from app.api.dependencies import get_current_user
 from app.core.neo4j_client import neo4j_client
 from app.core.database import get_messages_from_rdb, MessageModel, AsyncSessionLocal
 from app.services.knowledge_service import knowledge_queue
+from app.services.growth_support_service import growth_support_service
 
 router = APIRouter()
 
@@ -118,13 +121,13 @@ async def create_project(
     project_id = str(uuid.uuid4())
     now = datetime.utcnow()
     
-    # Create new project instance
     new_project = Project(
         id=project_id,
         name=project_in.name,
         description=project_in.description,
         project_type=project_in.project_type,
         repo_path=project_in.repo_path,
+        company_profile=project_in.company_profile,
         tenant_id=current_user.tenant_id,
         user_id=current_user.id,
         created_at=now,
@@ -139,30 +142,38 @@ async def create_project(
         p_prefix = project_id[:8]
         new_project.agent_config = ProjectAgentConfig(
             workflow_type="SEQUENTIAL",
-            entry_agent_id=f"agent_planner_{p_prefix}",
+            entry_agent_id=f"agent_classification_{p_prefix}",
             agents=[
                 AgentDefinition(
-                    agent_id=f"agent_planner_{p_prefix}",
-                    role="PLANNER",
+                    agent_id=f"agent_classification_{p_prefix}",
+                    role="CLASSIFICATION",
                     model=settings.PRIMARY_MODEL,
                     provider="OPENROUTER",
-                    system_prompt="You are a Master Planner. Break down tasks into steps.",
-                    next_agents=[f"agent_coder_{p_prefix}"]
+                    system_prompt="You are an expert Corporate Growth Diagnostician. Analyze the company profile.",
+                    next_agents=[f"agent_business_plan_{p_prefix}"]
                 ),
                 AgentDefinition(
-                    agent_id=f"agent_coder_{p_prefix}",
-                    role="CODER",
+                    agent_id=f"agent_business_plan_{p_prefix}",
+                    role="BUSINESS_PLAN",
                     model=settings.PRIMARY_MODEL,
                     provider="OPENROUTER",
-                    system_prompt="You are a Senior Coder. Write clean, efficient code.",
-                    next_agents=[f"agent_reviewer_{p_prefix}"]
+                    system_prompt="You are a Business Plan Architect. Reconstruct or generate the optimal business plan.",
+                    next_agents=[f"agent_matching_{p_prefix}"]
                 ),
                 AgentDefinition(
-                    agent_id=f"agent_reviewer_{p_prefix}",
-                    role="REVIEWER",
+                    agent_id=f"agent_matching_{p_prefix}",
+                    role="MATCHING",
                     model=settings.PRIMARY_MODEL,
                     provider="OPENROUTER",
-                    system_prompt="You are a Code Reviewer. Check for bugs and style.",
+                    system_prompt="You are a Certification and IP Matching Specialist. Score and identify gaps.",
+                    next_agents=[f"agent_roadmap_{p_prefix}"]
+                ),
+                AgentDefinition(
+                    agent_id=f"agent_roadmap_{p_prefix}",
+                    role="ROADMAP",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
+                    system_prompt="You are a Strategic Growth Roadmap Planner. Create a 3-year timeline.",
                     next_agents=[]
                 )
             ]
@@ -329,22 +340,38 @@ async def get_agent_config(
         # Return default config to allow editor to start with something
         return ProjectAgentConfig(
             workflow_type="SEQUENTIAL",
-            entry_agent_id="agent_planner",
+            entry_agent_id="agent_classification",
             agents=[
                 AgentDefinition(
-                    agent_id="agent_planner",
-                    role="PLANNER",
+                    agent_id="agent_classification",
+                    role="CLASSIFICATION",
                     model=settings.PRIMARY_MODEL,
                     provider="OPENROUTER",
-                    system_prompt="You are a Master Planner.",
-                    next_agents=["agent_coder"]
+                    system_prompt="You are an expert Corporate Growth Diagnostician.",
+                    next_agents=["agent_business_plan"]
                 ),
                 AgentDefinition(
-                    agent_id="agent_coder",
-                    role="CODER",
+                    agent_id="agent_business_plan",
+                    role="BUSINESS_PLAN",
                     model=settings.PRIMARY_MODEL,
                     provider="OPENROUTER",
-                    system_prompt="You are a Senior Coder.",
+                    system_prompt="You are a Business Plan Architect.",
+                    next_agents=["agent_matching"]
+                ),
+                AgentDefinition(
+                    agent_id="agent_matching",
+                    role="MATCHING",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
+                    system_prompt="You are a Certification and IP Matching Specialist.",
+                    next_agents=["agent_roadmap"]
+                ),
+                AgentDefinition(
+                    agent_id="agent_roadmap",
+                    role="ROADMAP",
+                    model=settings.PRIMARY_MODEL,
+                    provider="OPENROUTER",
+                    system_prompt="You are a Strategic Growth Roadmap Planner.",
                     next_agents=[]
                 )
             ]
@@ -650,3 +677,94 @@ async def get_knowledge_graph(
     print(f"DEBUG: [API] Returning {len(graph.get('nodes', []))} nodes and {len(graph.get('links', []))} links for project '{project_id}'")
     
     return graph
+
+
+@router.post("/{project_id}/growth-support/run")
+async def run_growth_support_pipeline(
+    project_id: str,
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+):
+    """Run E2E growth support pipeline (classification -> plan -> matching -> roadmap)."""
+    await _get_project_or_recover(project_id, current_user)
+    profile_payload = payload.get("profile")
+    if not profile_payload:
+        raise HTTPException(status_code=400, detail="profile is required")
+
+    profile = CompanyProfile(**profile_payload)
+    input_text = payload.get("input_text", "")
+    result = await growth_support_service.run_pipeline(project_id, profile, input_text=input_text)
+    return result
+
+
+@router.get("/{project_id}/growth-support/latest")
+async def get_latest_growth_support_result(
+    project_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Get latest growth support pipeline result from cache."""
+    await _get_project_or_recover(project_id, current_user)
+    data = await growth_support_service.get_latest(project_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="No growth support result found")
+    return data
+
+
+@router.get("/{project_id}/artifacts/{artifact_type}")
+async def get_growth_artifact(
+    project_id: str,
+    artifact_type: str,
+    format: str = "html",
+    current_user: User = Depends(get_current_user),
+):
+    """Return generated artifact in requested format."""
+    await _get_project_or_recover(project_id, current_user)
+    try:
+        content = await growth_support_service.get_artifact(project_id, artifact_type, format_name=format)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    if format == "pdf":
+        headers = {"Content-Disposition": f"attachment; filename={artifact_type}_{project_id}.pdf"}
+        return Response(content=content, media_type="application/pdf", headers=headers)
+    if format == "html":
+        return HTMLResponse(content=content)
+    return PlainTextResponse(content=content)
+
+@router.get("/{project_id}/documents/{doc_type}/download")
+async def download_document(
+    project_id: str,
+    doc_type: str, # "business_plan", "roadmap"
+    current_user: User = Depends(get_current_user)
+):
+    """Download generated artifacts as HTML"""
+    await _get_project_or_recover(project_id, current_user)
+
+    doc_mapping = {
+        "business_plan": "business_plan",
+        "roadmap": "roadmap",
+        "matching": "matching",
+    }
+    artifact_type = doc_mapping.get(doc_type)
+    if artifact_type:
+        try:
+            html_content = await growth_support_service.get_artifact(project_id, artifact_type, format_name="html")
+            headers = {"Content-Disposition": f"attachment; filename={artifact_type}_{project_id}.html"}
+            return HTMLResponse(content=html_content, headers=headers)
+        except KeyError:
+            # Fallback to legacy mock response below.
+            pass
+    
+    # Check storage/db for the generated document. For now, we return mock/generated HTML string
+    from fastapi.responses import HTMLResponse
+    
+    if doc_type == "business_plan":
+        html_content = f"<html><body><div style='font-family: sans-serif; padding: 20px;'><h1>사업계획서 (Project: {project_id})</h1><p>AI가 보정한 사업계획서 초안입니다.</p><h2>1. 문제인식</h2><p>보정된 내용...</p></div></body></html>"
+        headers = {"Content-Disposition": f"attachment; filename=business_plan_{project_id}.html"}
+        return HTMLResponse(content=html_content, headers=headers)
+    elif doc_type == "roadmap":
+        html_content = f"<html><body><div style='font-family: sans-serif; padding: 20px;'><h1>성장 로드맵 (Project: {project_id})</h1><p>연차별 인증 및 R&D 성장 로드맵 타임라인입니다.</p><ul><li><b>Y1:</b> 예비사회적기업 준비</li><li><b>Y2:</b> 상표 출원</li></ul></div></body></html>"
+        headers = {"Content-Disposition": f"attachment; filename=roadmap_{project_id}.html"}
+        return HTMLResponse(content=html_content, headers=headers)
+    else:
+        raise HTTPException(status_code=400, detail="Unknown document type")

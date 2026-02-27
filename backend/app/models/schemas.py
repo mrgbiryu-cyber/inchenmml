@@ -8,6 +8,7 @@ from enum import Enum
 from uuid import UUID
 
 from pydantic import BaseModel, Field, validator
+from .company import CompanyProfile
 
 
 # ============================================
@@ -292,6 +293,83 @@ class ErrorResponse(BaseModel):
 
 
 # ============================================
+# RuleSet Models
+# ============================================
+
+class RuleStatus(str, Enum):
+    DRAFT = "draft"
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class RuleCondition(BaseModel):
+    field: str
+    op: Literal["eq", "neq", "gt", "gte", "lt", "lte", "in", "exists"]
+    value: Optional[Any] = None
+
+
+class RuleAction(BaseModel):
+    target: str = Field(..., description="company_type | growth_stage | matching_score")
+    value: Any
+    score: float = 0.0
+    reason_code: str
+
+
+class RuleDefinition(BaseModel):
+    rule_id: str
+    name: str
+    conditions: List[RuleCondition] = Field(default_factory=list)
+    actions: List[RuleAction] = Field(default_factory=list)
+    weight: float = 1.0
+    enabled: bool = True
+
+
+class RuleSet(BaseModel):
+    ruleset_id: str
+    version: str
+    status: RuleStatus = RuleStatus.DRAFT
+    description: Optional[str] = None
+    effective_from: Optional[datetime] = None
+    author: Optional[str] = None
+    company_type_rules: List[RuleDefinition] = Field(default_factory=list)
+    growth_stage_rules: List[RuleDefinition] = Field(default_factory=list)
+    matching_rules: List[RuleDefinition] = Field(default_factory=list)
+    weights: Dict[str, float] = Field(default_factory=dict)
+    cutoffs: Dict[str, float] = Field(default_factory=dict)
+    fallback_policy: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class RuleTrace(BaseModel):
+    rule_id: str
+    matched: bool
+    score_delta: float = 0.0
+    reason_code: Optional[str] = None
+
+
+class RuleEvalResult(BaseModel):
+    target: str
+    value: str
+    score: float = 0.0
+    confidence: float = 0.0
+    reason_codes: List[str] = Field(default_factory=list)
+    ruleset_id: str
+    ruleset_version: str
+    matched_rules: List[RuleTrace] = Field(default_factory=list)
+    unmatched_rules: List[RuleTrace] = Field(default_factory=list)
+
+
+class RuleSetPreviewRequest(BaseModel):
+    profile: CompanyProfile
+
+
+class RuleSetCloneRequest(BaseModel):
+    version: str = Field(..., description="new version label, e.g. v1.1")
+    description: Optional[str] = None
+
+
+# ============================================
 # Project & Agent Models (Phase 1 & 2)
 # ============================================
 
@@ -303,6 +381,10 @@ class AgentType(str, Enum):
     QA = "QA"
     GIT = "GIT"
     CUSTOM = "CUSTOM"
+    CLASSIFICATION = "CLASSIFICATION"
+    BUSINESS_PLAN = "BUSINESS_PLAN"
+    MATCHING = "MATCHING"
+    ROADMAP = "ROADMAP"
 
 class AgentDefinition(BaseModel):
     """Defines a single agent in a workflow"""
@@ -368,8 +450,9 @@ class ProjectCreate(BaseModel):
     """Request to create a new project"""
     name: str
     description: Optional[str] = None
-    project_type: Literal["EXISTING", "NEW"]
+    project_type: Literal["EXISTING", "NEW", "GROWTH_SUPPORT"] = "GROWTH_SUPPORT"
     repo_path: Optional[str] = None
+    company_profile: Optional[CompanyProfile] = None
     agent_config: Optional[ProjectAgentConfig] = None
 
 class Project(BaseModel):
@@ -377,8 +460,9 @@ class Project(BaseModel):
     id: str = Field(..., description="UUID")
     name: str
     description: Optional[str] = None
-    project_type: Literal["EXISTING", "NEW", "SYSTEM"] = "EXISTING"
+    project_type: Literal["EXISTING", "NEW", "SYSTEM", "GROWTH_SUPPORT"] = "GROWTH_SUPPORT"
     repo_path: Optional[str] = None
+    company_profile: Optional[CompanyProfile] = None
     tenant_id: str
     user_id: str = "system"
     created_at: datetime = Field(default_factory=datetime.utcnow)

@@ -7,11 +7,15 @@ import uuid
 from typing import Tuple, Optional, List
 from datetime import datetime
 import os
+import importlib.util
 from app.core.config import settings
+from structlog import get_logger
 
 # For SQLite compatibility with UUID-like strings if not using PostgreSQL
 from sqlalchemy.types import TypeDecorator, CHAR
 import json
+
+logger = get_logger(__name__)
 
 class GUID(TypeDecorator):
     """Platform-independent GUID type.
@@ -114,14 +118,92 @@ class ThreadModel(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+
+class GrowthRunModel(Base):
+    __tablename__ = "growth_runs"
+
+    id = Column(String(100), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_key = Column(String(100), nullable=False, index=True)
+    result_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class GrowthArtifactModel(Base):
+    __tablename__ = "growth_artifacts"
+
+    id = Column(String(100), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(String(100), nullable=False, index=True)
+    project_key = Column(String(100), nullable=False, index=True)
+    artifact_type = Column(String(50), nullable=False, index=True)
+    format = Column(String(20), nullable=False, index=True)
+    content_text = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
 # Database URL Handling
-DATABASE_URL = settings.DATABASE_URL
-if not DATABASE_URL or "postgresql" in DATABASE_URL: # Override local postgresql placeholder
-    # Default to SQLite for local development
+DATABASE_URL = (settings.DATABASE_URL or "").strip()
+IS_PRODUCTION = settings.ENVIRONMENT.lower() == "production"
+LOCAL_SQLITE_PLACEHOLDERS = {
+    "postgresql://user:password@localhost:5432/buja_core",
+    "postgresql+asyncpg://user:password@localhost:5432/buja_core",
+}
+
+
+def _build_default_sqlite_url() -> str:
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     db_path = os.path.join(base_dir, "data", "buja.db")
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    DATABASE_URL = f"sqlite+aiosqlite:///{db_path}"
+    return f"sqlite+aiosqlite:///{db_path}"
+
+
+def _has_asyncpg() -> bool:
+    return importlib.util.find_spec("asyncpg") is not None
+
+
+def _resolve_database_url() -> str:
+    strict_mode = bool(settings.STRICT_DB_MODE) or IS_PRODUCTION
+    allow_without_postgres = bool(settings.STARTUP_WITHOUT_POSTGRES)
+    unresolved = (not DATABASE_URL) or (DATABASE_URL in LOCAL_SQLITE_PLACEHOLDERS)
+
+    if unresolved:
+        if strict_mode and not allow_without_postgres:
+            raise RuntimeError(
+                "DATABASE_URL is required in production/strict mode. SQLite fallback is blocked."
+            )
+        logger.warning(
+            "DATABASE_URL unresolved; falling back to sqlite",
+            strict_mode=strict_mode,
+            allow_without_postgres=allow_without_postgres,
+        )
+        return _build_default_sqlite_url()
+
+    selected_url = DATABASE_URL
+
+    if selected_url.startswith("postgresql://"):
+        if strict_mode:
+            raise RuntimeError(
+                "DATABASE_URL must use postgresql+asyncpg:// in production/strict mode."
+            )
+        if _has_asyncpg():
+            selected_url = selected_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            logger.warning("DATABASE_URL upgraded to postgresql+asyncpg://")
+        else:
+            raise RuntimeError(
+                "DATABASE_URL uses postgresql:// but asyncpg is not available."
+            )
+
+    if selected_url.startswith("postgresql+asyncpg://") and not _has_asyncpg():
+        raise RuntimeError("DATABASE_URL requires asyncpg, but asyncpg is not installed.")
+
+    if IS_PRODUCTION and ("localhost" in selected_url.lower() or "127.0.0.1" in selected_url):
+        raise RuntimeError("DATABASE_URL must not use localhost/127.0.0.1 in production.")
+
+    if IS_PRODUCTION and selected_url.startswith("sqlite"):
+        raise RuntimeError("SQLite is not allowed when ENVIRONMENT=production.")
+
+    return selected_url
+
+
+DATABASE_URL = _resolve_database_url()
 
 # [UTF-8] Ensure all JSON serialization in DB uses ensure_ascii=False
 engine = create_async_engine(
@@ -154,7 +236,7 @@ async def init_db():
     try:
         await neo4j_client.create_indexes()
     except Exception as e:
-        print(f"⚠️ Failed to create Neo4j indexes during init: {e}")
+        logger.warning("Failed to create Neo4j indexes during init", error=str(e))
 
 def _normalize_project_id(project_id: str) -> Optional[uuid.UUID]:
     """
@@ -293,3 +375,69 @@ async def delete_expired_drafts(days: int = 7):
         result = await session.execute(stmt)
         await session.commit()
         return result.rowcount
+
+
+def _normalize_project_key(project_id: str) -> str:
+    if not project_id:
+        return "system-master"
+    return str(project_id).strip().lower()
+
+
+async def save_growth_run(project_id: str, result_json: dict, artifacts: dict) -> str:
+    run_id = str(uuid.uuid4())
+    project_key = _normalize_project_key(project_id)
+    async with AsyncSessionLocal() as session:
+        run = GrowthRunModel(
+            id=run_id,
+            project_key=project_key,
+            result_json=result_json,
+        )
+        session.add(run)
+        for artifact_type, format_map in artifacts.items():
+            for fmt, content in format_map.items():
+                if isinstance(content, str):
+                    session.add(
+                        GrowthArtifactModel(
+                            run_id=run_id,
+                            project_key=project_key,
+                            artifact_type=artifact_type,
+                            format=fmt,
+                            content_text=content,
+                        )
+                    )
+        await session.commit()
+    return run_id
+
+
+async def get_latest_growth_run(project_id: str) -> Optional[dict]:
+    from sqlalchemy import select
+
+    project_key = _normalize_project_key(project_id)
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(GrowthRunModel)
+            .where(GrowthRunModel.project_key == project_key)
+            .order_by(GrowthRunModel.created_at.desc())
+            .limit(1)
+        )
+        row = (await session.execute(stmt)).scalar_one_or_none()
+        return row.result_json if row else None
+
+
+async def get_latest_growth_artifact(project_id: str, artifact_type: str, fmt: str) -> Optional[str]:
+    from sqlalchemy import select
+
+    project_key = _normalize_project_key(project_id)
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(GrowthArtifactModel)
+            .where(
+                GrowthArtifactModel.project_key == project_key,
+                GrowthArtifactModel.artifact_type == artifact_type,
+                GrowthArtifactModel.format == fmt,
+            )
+            .order_by(GrowthArtifactModel.created_at.desc())
+            .limit(1)
+        )
+        row = (await session.execute(stmt)).scalar_one_or_none()
+        return row.content_text if row else None
